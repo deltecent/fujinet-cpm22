@@ -71,8 +71,8 @@ gap in the stock version. It is an interim fix, not a fork or a pending PR. See
 ## What's tested so far
 
 Everything here has been built and verified against the **emulated** `fujinet-pc-RS232`
-build, talking to a local `tnfsd` test server, on **macOS**. All three tools have also been
-verified end to end against a real `tnfsd` running on actual Raspberry Pi hardware over a real
+build, talking to a local TNFS test server, on **macOS**. All three tools have also been
+verified end to end against a TNFS server running on actual Raspberry Pi hardware over a real
 LAN. This includes the mixed read-only/write-only permission layout described in
 `tnfsd-server-setup/`. **All three tools have also now been verified on a real physical
 FujiNet RS232 adapter on a real Altair 8800c.** See `fujinet-rs232/` for bring-up
@@ -206,12 +206,21 @@ the file.
 
 This folder includes each program three ways: `.COM` (ready to run), `.HEX` (Intel hex, what
 `ASM`/`LOAD` produce and consume), and `.ASM` (source). So you can get them onto a disk by
-whatever transfer method your setup already has. If you have *any* existing way to get a file
-from your host machine onto the CP/M disk (a shared/mounted disk image, a custom bridge of
-your own, `altairsim`'s own file-loading tools if it has any, and so on), just use it to copy
-the `.COM` files across, then skip to "Using the tools" below.
+whatever transfer method your setup already has.
 
-**If you have nothing else, here is the classic, universal CP/M way.** It needs nothing but a
+**On `altairsim`, use its Host Bridge.** The system disk in `altairsim/` already has the Host
+Bridge tools `R`, `W`, and `HDIR`. `R` copies a file from your host into CP/M. It reads from the
+folder you started `altairsim` in (`altairsim/`, if you followed its README).
+
+1. Copy `FUJIGET.COM`, `FUJIPUT.COM`, and `FUJIDIR.COM` from the top of this repo into
+   `altairsim/`.
+2. At the CP/M prompt, type `R FUJIGET.COM`. `R` copies the file and reports its size.
+3. Repeat for `FUJIPUT.COM` and `FUJIDIR.COM`. `HDIR` lists the host files that `R` can see.
+
+Then skip to "Using the tools" below. Any other way to get a file from your host onto the CP/M
+disk also works, for example a disk image you can mount on the host.
+
+**On other machines, here is the classic, universal CP/M way.** It needs nothing but a
 terminal connection to the console and CP/M's own `PIP`, `ASM`, and `LOAD`, which are on every
 CP/M 2.2 system:
 
@@ -490,26 +499,25 @@ it. You are not likely to need to touch it otherwise.
 
 ## 6. Testing without a real network host
 
-You do not need a real TNFS/HTTP server on your network to try any of this. A local `tnfsd`
-test server works fine, and is what these tools were actually verified against:
+You do not need a real TNFS/HTTP server on your network to try any of this. Run
+[de-tnfsd](https://github.com/trgeuy/de-tnfsd), our TNFS server, on your own machine:
 
-1. Download the official `tnfsd` binary for your platform from
-   <https://github.com/FujiNetWIFI/tnfsd/releases> (it is a small, standalone server from the
-   FujiNet project itself; a few tens of KB, no install needed).
-2. Make a directory to serve, e.g. `mkdir share` and drop a test file or two in it.
-3. Run it: `./tnfsd share` (add `-r` for read-only, `-p PORT` for a non-default port; it
-   listens on UDP/TCP `16384` by default). On macOS you will likely need
-   `xattr -d com.apple.quarantine ./tnfsd` first, same as FujiNet-PC above.
+1. Build it from source: `git clone https://github.com/trgeuy/de-tnfsd`, then `make` in that
+   folder. It is a small C program with no dependencies, and POSIX only (macOS and Linux, not
+   Windows). The build puts the server at `bin/de-tnfsd`.
+2. Make a directory to serve, e.g. `mkdir share`, and put a test file or two in it.
+3. Run it: `bin/de-tnfsd --serve-root-rw share`. This serves the whole directory, read/write.
+   It listens on port `16384` by default; `-p PORT` picks another.
 4. Point your `N:` URLs at it, e.g. `FUJIDIR N1:TNFS://127.0.0.1/`.
 
-That is it. FujiNet-PC talks to `tnfsd` the same way it would talk to any real TNFS server. So
-everything above works identically against `127.0.0.1` as it would against a real remote host.
+That is it. FujiNet-PC talks to `de-tnfsd` the same way it talks to any real TNFS server. So
+everything above works the same against `127.0.0.1` as against a real remote host.
 
-**Want to run a real server with mixed read-only/write-only folders** (an "upload here, browse
-there" layout, like an old-school anonymous FTP site)? See `tnfsd-server-setup/` in this repo,
-which points you at [de-tnfsd](https://github.com/trgeuy/de-tnfsd) for the server itself and
-covers a real CP/M-side gotcha (command-line case-folding) that will otherwise make lowercase
-server paths unreachable.
+**Want to run a real server with a read-only folder and a write-only upload folder** (an
+"upload here, browse there" layout, like an old-school anonymous FTP site)? That is
+`de-tnfsd`'s default mode. See `tnfsd-server-setup/` in this repo for the setup, and for a
+real CP/M-side gotcha (command-line case-folding) that will otherwise make lowercase server
+paths unreachable.
 
 ---
 
