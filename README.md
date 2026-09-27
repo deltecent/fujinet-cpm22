@@ -62,6 +62,12 @@ silently breaks a `FUJIGET`/`FUJIPUT`/`FUJIDIR` URL against a case-sensitive rem
 HTTP/HTTPS server. It is repo-only, for the same reason as the other three. See
 <https://github.com/trgeuy/fujinet-cpm22/tree/main/wget>.
 
+`cpm-tnfsd/` is `TNFSD`, a TNFS server that runs on CP/M itself. Another machine with a
+FujiNet can then use `FUJIGET`, `FUJIPUT` and `FUJIDIR` on this machine's files: CP/M-to-CP/M
+file transfer over a LAN. It has real limits, and no password protection. Read its README
+before you use it. It is repo-only. See
+<https://github.com/trgeuy/fujinet-cpm22/tree/main/cpm-tnfsd>.
+
 `firmware-uploader-apple-silicon/` is unrelated to CP/M itself. It is useful to anyone bringing
 up a real FujiNet adapter from an Apple Silicon Mac. It is a patched drop-in replacement for
 upstream `fujinet-firmware`'s firmware-flashing script. It fixes an Apple Silicon compatibility
@@ -536,8 +542,10 @@ paths unreachable.
   source: a non-blocking `recv(MSG_PEEK)` returning 0 is misread as "connection closed," which
   can happen to a perfectly healthy but momentarily quiet TCP connection. This affects raw
   `TCP:` connections (like this project's earlier `NC.COM` netcat tool). It has not been
-  observed against `FUJIGET`/`FUJIPUT`/`FUJIDIR`'s TNFS-based testing, which is UDP-based and
-  unaffected. Worth knowing about if you point these tools at a raw `TCP:` URL and see
+  observed in `FUJIGET`/`FUJIPUT`/`FUJIDIR`'s TNFS testing. Note that TNFS is not always UDP:
+  FujiNet's TNFS client tries TCP first, and falls back to UDP only when the server does not
+  answer on TCP. Against a server that accepts TCP, such as `de-tnfsd` or `TNFSD`, TNFS runs
+  over TCP. Worth knowing about if you point these tools at a raw `TCP:` URL and see
   unexpected disconnects on an idle link.
 - **Disk mounting** (`FUJICMD_MOUNT_HOST`/`MOUNT_IMAGE`, i.e. making a remote disk image appear
   as a real CP/M drive letter) is not implemented and not planned for now. It would need a new
