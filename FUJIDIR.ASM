@@ -1,7 +1,8 @@
 ;-----------------------------------------------------------------------
-; FUJIDIR.COM v1.5 -- list a directory through FujiNet's N: network device.
+; FUJIDIR.COM v1.6 -- list a directory through FujiNet's N: network device.
 ;
 ;       FUJIDIR N:<url>         e.g.  FUJIDIR N1:TNFS://192.168.1.5/
+;       FUJIDIR N:<url>/<pattern>     FUJIDIR N1:TNFS://192.168.1.5/*.COM
 ;
 ; Opens <url> in FujiNet's DIRECTORY access mode (not read/write -- see
 ; below) and prints what comes back: one name per line, files padded out
@@ -64,6 +65,20 @@
 ; v1.5: that explanation printed before EVERY listing, which got old
 ; fast once you knew it. Moved into the usage message (bare FUJIDIR, no
 ; args) instead -- said once, not on every run.
+;-----------------------------------------------------------------------
+; v1.6: wildcards. If the last path segment has a '*' or '?', MKPRBS
+; does not add the trailing '/', so FujiNet sends that segment to the
+; server as the listing's pattern (fujinet-firmware FS.cpp
+; update_dir_filename; TNFS passes it in OPENDIRX). The SERVER does the
+; matching, so its rules apply: de-tnfsd uses its own glob, TNFSD.COM
+; matches like CP/M. A segment with no wildcard still gets the '/' --
+; the v1.2 fix is unchanged. A pattern that matches nothing gives an
+; empty listing: "nothing matches."
+; '?' CANNOT WORK: FujiNet's URL parser (peoples_url_parser.cpp,
+; processPath) cuts the path at the first '?' as a URL query, and
+; never URL-decodes a TNFS path, so %3F does not help either. Tested:
+; /PUB/SCROLL??.TXT reached the server as pattern "SCROLL". So a '?' in
+; the last segment is refused with a message (EQMARK), not sent.
 ;-----------------------------------------------------------------------
 ; AND BDOS CLOBBERS EVERY REGISTER (A,B,C,D,E,H,L -- only SP survives).
 ;-----------------------------------------------------------------------
@@ -141,6 +156,9 @@ START:  LXI     SP,STACK
         CALL    SAYCONN
 
         CALL    MKPRBS          ; SPEC -> PROBESPC, with a trailing '/'
+        LDA     QMARK           ; a '?' in the pattern: FujiNet can't send it
+        ORA     A
+        JNZ     EQMARK
         LXI     H,PROBESPC
         SHLD    SRCPTR
         CALL    MKOPEN
@@ -398,18 +416,36 @@ MKO1:   LDAX    D
 
 ;-----------------------------------------------------------------------
 ; MKPRBS -- copy SPEC into PROBESPC, appending a trailing '/' if SPEC
-; doesn't already end in one. See this file's header for why.
+; doesn't already end in one. See this file's header for why. v1.6:
+; not when the last path segment has a wildcard -- B tracks that.
 ;-----------------------------------------------------------------------
 MKPRBS: LXI     H,SPEC
         LXI     D,PROBESPC
+        MVI     B,0             ; B = 1: a '*' or '?' since the last '/'
+        MVI     C,0             ; C = 1: a '?' since the last '/'
 MKB1:   MOV     A,M
         ORA     A
         JZ      MKB2
         STAX    D
-        INX     H
+        CPI     '/'
+        JNZ     MKBW
+        MVI     B,0             ; a new segment starts
+        MVI     C,0
+MKBW:   CPI     '*'
+        JZ      MKBWC
+        CPI     '?'
+        JNZ     MKBN
+        MVI     C,1
+MKBWC:  MVI     B,1
+MKBN:   INX     H
         INX     D
         JMP     MKB1
-MKB2:   DCX     D               ; DE -> last copied character
+MKB2:   MOV     A,C
+        STA     QMARK
+        MOV     A,B
+        ORA     A
+        JNZ     MKB3X           ; a pattern: no '/' after it
+        DCX     D               ; DE -> last copied character
         LDAX    D
         CPI     '/'
         JZ      MKB3
@@ -417,7 +453,7 @@ MKB2:   DCX     D               ; DE -> last copied character
         MVI     A,'/'
         STAX    D
 MKB3:   INX     D
-        XRA     A
+MKB3X:  XRA     A
         STAX    D
         RET
 
@@ -741,6 +777,11 @@ SAYNONE:LXI     D,MNONE
         MVI     C,PRSTR
         JMP     BDOS
 
+EQMARK: LXI     D,MQMARK
+        MVI     C,PRSTR
+        CALL    BDOS
+        JMP     0
+
 USAGE:  LXI     D,MUSAGE
         MVI     C,PRSTR
         CALL    BDOS
@@ -759,12 +800,16 @@ MBADP:  DB      CR,LF,'FUJIDIR: failed -- parent path does not'
         DB      ' exist.',CR,LF,'$'
 MABRT:  DB      CR,LF,'FUJIDIR: aborted.',CR,LF,'$'
 MNONE:  DB      'FUJIDIR: nothing matches.',CR,LF,'$'
+MQMARK: DB      CR,LF,'FUJIDIR: FujiNet can''t send a ''?'' in a'
+        DB      ' URL. Use ''*'' instead.',CR,LF,'$'
 
-MUSAGE: DB      CR,LF,'FUJIDIR v1.5 -- list a directory through FujiNet''s'
+MUSAGE: DB      CR,LF,'FUJIDIR v1.6 -- list a directory through FujiNet''s'
         DB      ' N: network device.',CR,LF,CR,LF
         DB      '   FUJIDIR N:<url>',CR,LF,CR,LF
-        DB      'Example',CR,LF
-        DB      '   FUJIDIR N1:TNFS://192.168.1.5/',CR,LF,CR,LF
+        DB      'Examples',CR,LF
+        DB      '   FUJIDIR N1:TNFS://192.168.1.5/',CR,LF
+        DB      '   FUJIDIR N1:TNFS://192.168.1.5/*.COM',CR,LF,CR,LF
+        DB      'A pattern takes ''*'' only, not ''?''.',CR,LF
         DB      'Sizes are shown as bytes, or K/M for larger'
         DB      ' files (from the server).',CR,LF,'$'
 
@@ -774,6 +819,7 @@ PARENT:   DS    SPECLEN
 PROBESPC: DS    SPECLEN
 SRCPTR:   DS    2
 PVALID:   DS    1
+QMARK:    DS    1
 TOCNT:  DS      1
 REQLEN: DS      2
 ANYOUT: DS      1

@@ -277,6 +277,44 @@ But it is only meaningful for files, not directories. Opening a directory path i
 read mode is a different, untested code path, not a substitute for the
 DIRECTORY-mode-with-trailing-slash technique above.
 
+**FUJIDIR v1.6 uses the pattern on purpose.** When the last path segment has a `*`,
+`FUJIDIR` sends it with no trailing slash, so the server filters the listing. See the
+FUJIDIR section of the main README.
+
+## Verified live (2026-09-27): a `?` in a URL never reaches the server
+
+FujiNet's URL parser (`lib/utils/peoples_url_parser.cpp`, `processPath`) cuts the path
+at the first `?` and keeps the rest as a URL query. FujiNet does not URL-decode a TNFS
+path, so `%3F` does not get through either. In a live test, `.../PUB/SCROLL??.TXT` reached
+the server as the pattern `SCROLL`. So a pattern can use `*` but not `?`.
+
+## Verified live (2026-09-27): `FUJICMD_GET_ADAPTERCONFIG` (`0xE8`) gives the adapter's IP address
+
+Send `0xE8` to the Fuji device (`0x70`) with no parameters (descriptor `0`). The ACK
+payload is the firmware's packed `AdapterConfig` struct
+(`lib/device/fujiDevice/fujiDevice.h`), 140 bytes:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 33 | SSID |
+| 33 | 64 | hostname |
+| 97 | 4 | IP address, one byte per part |
+| 101 | 4 | gateway |
+| 105 | 4 | netmask |
+| 109 | 4 | DNS |
+| 113 | 6 | MAC address |
+| 119 | 6 | BSSID |
+| 125 | 15 | firmware version |
+
+- On the real RS232 adapter, the IP address is the adapter's real address. When the
+  adapter has no WiFi connection, the source says the SSID is `NOT CONNECTED` and the IP
+  is `0.0.0.0`. This case was not tested live.
+- On FujiNet-PC, the IP is always `127.0.0.1`. The code has a placeholder there
+  (`lib/hardware/fnSystemNet.cpp`, `get_ip4_info`). Only the hostname is real.
+- The first byte of an address such as `192.x.x.x` is `0xC0`, the SLIP frame byte. It
+  arrives escaped, so decode escapes before you read the struct.
+- `TNFSD.COM` (`cpm-tnfsd/`) uses this command to print its own address at startup.
+
 ## Remaining gap
 
 **`FUJICMD_MOUNT_HOST`/`MOUNT_IMAGE` payload shape:** not traced or tested. To close this

@@ -18,12 +18,12 @@ why FUJIGET/FUJIPUT follow that lineage instead.)
 ```
 FUJIGET N:<url> file.ext        pull a file down, e.g. FUJIGET N1:TNFS://192.168.1.5/HELLO.TXT HELLO.TXT
 FUJIPUT file.ext N:<url> [B|T]  push a file up,    e.g. FUJIPUT HELLO.TXT N1:TNFS://192.168.1.5/HELLO.TXT T
-FUJIDIR N:<url>                 list a directory,  e.g. FUJIDIR N1:TNFS://192.168.1.5/
+FUJIDIR N:<url>[pattern]        list a directory,  e.g. FUJIDIR N1:TNFS://192.168.1.5/*.COM
 ```
 
 Each tool has its own version number. Each tool changes on its own schedule, not together.
 Each tool prints its own version when you run it with no arguments. Current versions:
-`FUJIGET` v1.6, `FUJIPUT` v1.4, `FUJIDIR` v1.5.
+`FUJIGET` v1.6, `FUJIPUT` v1.4, `FUJIDIR` v1.6.
 
 FujiNet's protocol supports a delete/remove counterpart (`RMDIR`, file `DELETE`). This
 project deliberately does not include one. See "Known limitations" below.
@@ -341,6 +341,7 @@ parent path checks out, since creating or writing was expected to just work, or
 
 ```
 FUJIDIR N:<url>
+FUJIDIR N:<url><pattern>
 ```
 
 FUJIDIR opens `<url>` in FujiNet's directory-listing mode and prints what comes back, one
@@ -356,6 +357,25 @@ server's root, `FUJIDIR N1:TNFS://192.168.1.5/SUBDIR/` lists inside a subdirecto
 slash on the target is optional as of v1.2. FUJIDIR adds one internally before opening if you
 leave it off (earlier versions needed it typed explicitly, or risked listing the *parent*
 directory's matching entries instead of the subdirectory you meant).
+
+#### Wildcards (v1.6)
+
+Put a pattern with `*` as the last part of the URL. FUJIDIR then lists only the entries
+that match:
+
+```
+FUJIDIR N1:TNFS://192.168.1.5/*.COM
+FUJIDIR N1:TNFS://192.168.1.5/GAMES/PAC*.*
+```
+
+- **Use `*`, not `?`.** FujiNet reads a `?` in a URL as the start of a URL query, and cuts
+  the path there. FUJIDIR refuses a `?` in the pattern with a message.
+- **The server does the matching**, so its rules apply. `de-tnfsd` matches like a Unix
+  shell: `FUJI*` matches `FUJIGET.COM`. `TNFSD` (in `cpm-tnfsd/`) matches like CP/M's
+  `DIR`: `FUJI*` matches only files with no extension, so use `FUJI*.*`.
+- **No match** gives `FUJIDIR: nothing matches.`
+- **Only the last part of the path is a pattern.** FUJIDIR sends a `*` in a folder name
+  as part of the folder name.
 
 If the open fails, FUJIDIR reports `not found on that remote server` (the parent path exists,
 the target does not) or `failed -- parent path does not exist` (same best-effort diagnosis as
