@@ -8,7 +8,7 @@ and `FUJIPUT`. That gives you CP/M-to-CP/M file transfer over a LAN.
 TNFSD                           serve the current drive, current user area
 ```
 
-Current version: `TNFSD` v0.3.
+Current version: `TNFSD` v0.4.
 
 ## Read the limits first
 
@@ -40,6 +40,8 @@ Current version: `TNFSD` v0.3.
   512 KB for a larger file. A file transfer uses the real size.
 - **Changed disks.** TNFSD reads the directory when it starts. If you change the
   disk while it runs, stop TNFSD and start it again.
+- **FujiNet-PC.** On FujiNet-PC, TNFSD shows the wrong address, and only one
+  copy can serve at a time. See [With FujiNet-PC](#with-fujinet-pc).
 - **Serial port.** TNFSD talks to the FujiNet through the 88-2SIO, unit b, at
   ports `12H`/`13H`, like the other tools here. To change this, see section 5 of
   the [main README](../README.md).
@@ -55,7 +57,8 @@ Current version: `TNFSD` v0.3.
 TNFSD shows what it does on the console:
 
 ```
-TNFSD v0.3: serving drive A: (user 0) on TCP port 16384.
+TNFSD v0.4: serving drive A: (user 0) on TCP port 16384.
+Connect to N1:TNFS://192.168.1.30/
 40 files cached. Ctrl-C quits.
 Client connected.
   Directory listed: 40 files.
@@ -71,6 +74,9 @@ Client connected.
 Client disconnected.
 ```
 
+- The `Connect to` line shows the server's address, which clients use. TNFSD
+  gets it from the FujiNet adapter when it starts. If the adapter has no WiFi
+  connection, TNFSD shows `FujiNet has no IP address` instead.
 - A transfer line shows a dot for each KB, then the byte count.
 - `FUJIPUT` first checks if the file exists. That shows as `NAME: not found.`
   just before the upload.
@@ -79,13 +85,36 @@ Client disconnected.
 
 ### On the client machine
 
-Use the IP address of the server machine's FujiNet adapter:
+Use the address from the server's `Connect to` line:
 
 ```
 FUJIDIR N1:TNFS://192.168.1.30/
 FUJIGET N1:TNFS://192.168.1.30/NAME.EXT NAME.EXT
 FUJIPUT NAME.EXT N1:TNFS://192.168.1.30/NAME.EXT
 ```
+
+### With FujiNet-PC
+
+FujiNet-PC is the FujiNet program for a computer. It is what an emulator such
+as `altairsim` connects to. TNFSD works with it, but with these differences:
+
+- **The `Connect to` line shows `127.0.0.1`.** FujiNet-PC does not get the
+  host's IP address. It always reports `127.0.0.1`, the host's own loopback
+  address. A client on another machine cannot use that address.
+- **Clients connect to the host's IP address.** FujiNet-PC accepts
+  connections on all the host's network interfaces. Use the IP address of the
+  computer that runs FujiNet-PC:
+
+  ```
+  FUJIDIR N1:TNFS://<IP address of the host>/
+  ```
+
+- **Only the first TNFSD on a host accepts connections.** Each TNFSD tells
+  its FujiNet-PC to listen on TCP port 16384. Only one program on a host can
+  listen on a port. The first TNFSD that starts gets it. A TNFSD on a second
+  FujiNet-PC instance on the same host then shows
+  `TNFSD: FujiNet refused to listen (NAK).` It then stops. FujiNet's TNFS
+  client always uses port 16384, so a second port does not help.
 
 ## Build it
 
@@ -96,10 +125,12 @@ ASM TNFSD                       -> TNFSD.HEX
 LOAD TNFSD                      -> TNFSD.COM
 ```
 
-`TNFSD.COM` is 4480 bytes.
+`TNFSD.COM` is 4736 bytes.
 
 ## How it works
 
+- At startup, TNFSD sends `GET_ADAPTERCONFIG` (`0E8H`) to the Fuji device
+  (`70H`) and prints the IP address from the reply.
 - TNFSD opens FujiNet's `N:` device as a TCP server: `N1:TCP://:16384/`. When a
   client connects, TNFSD accepts it with the `NET_CONTROL` command (`41H`).
 - TCP does not keep packet boundaries. TNFSD finds the end of each TNFS request
@@ -124,6 +155,8 @@ TCP works, and FujiNet's TNFS client tries it first.
   The adapter ran a firmware build from `fujinet-firmware` source, September 2026.
 - **Client:** `altairsim` with FujiNet-PC, running `FUJIDIR`, `FUJIGET` and
   `FUJIPUT`.
+- **v0.4 (the IP address line):** the real 8800c, and also `altairsim` with
+  FujiNet-PC as the server.
 
 | Test | Result |
 |---|---|
@@ -133,6 +166,10 @@ TCP works, and FujiNet's TNFS client tries it first.
 | `FUJIGET` of a missing file | `not found` on the client |
 | Directory listing of 37 files | 42 ms |
 | Read speed | about 145 ms for each 512 bytes |
+| v0.4 `Connect to` line, real adapter | its real IP address |
+| v0.4 `Connect to` line, FujiNet-PC | `127.0.0.1` |
+| Real 8800c `FUJIDIR` to a TNFSD on FujiNet-PC, through the host's IP address | all files listed |
+| Two FujiNet-PC instances on one host, TNFSD on each | the second gets `refused to listen` |
 
 A scripted TNFS client on a Mac also tested each command on its own, and the
 error replies.

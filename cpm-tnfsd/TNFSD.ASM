@@ -1,5 +1,5 @@
 ;-----------------------------------------------------------------------
-; TNFSD.COM v0.3 -- a TNFS server for CP/M 2.2, through FujiNet.
+; TNFSD.COM v0.4 -- a TNFS server for CP/M 2.2, through FujiNet.
 ;
 ;       TNFSD                   serve the current drive, current user
 ;
@@ -39,6 +39,10 @@
 ;
 ; CP/M FILES ARE RECORDS: a file's size is a multiple of 128 bytes, and
 ; the last record's unused bytes are whatever was written (usually ^Z).
+;
+; ADDRESS: at startup TNFSD asks FujiNet for its own IP address and
+; prints it, so the user knows what the other machine connects to.
+; See SHOWIP.
 ;
 ; CONSOLE: a line when a client connects and disconnects, and one per
 ; file sent or received (a dot per KB as it goes, then the byte count).
@@ -103,6 +107,9 @@ CMDSTAT EQU     53H
 CMDACPT EQU     41H             ; NET_CONTROL: accept the waiting client
 CMDCCLI EQU     63H             ; NET_CLOSE_CLIENT: drop the client
 ACKCMD  EQU     06H
+FUJIDEV EQU     70H             ; the Fuji control device
+CMDACFG EQU     0E8H            ; GET_ADAPTERCONFIG
+IPOFF   EQU     97              ; its reply: ssid(33), hostname(64), IP(4)
 
 ACCRW   EQU     0CH             ; access mode: read/write
 TRANONE EQU     00H             ; translation: none (binary)
@@ -205,9 +212,10 @@ ZV:     MOV     M,A
         MOV     L,A
         MVI     H,0
         CALL    PDEC
-        LXI     D,MBAN3         ; " on TCP 16384. Ctrl-C quits."
+        LXI     D,MBAN3         ; ") on TCP port 16384."
         MVI     C,PRSTR
         CALL    BDOS
+        CALL    SHOWIP          ; "Connect to N1:TNFS://a.b.c.d/"
 
         CALL    SCAN            ; the directory cache
         LDA     DIRCNT          ; "N files cached. Ctrl-C quits."
@@ -229,6 +237,64 @@ ZV:     MOV     M,A
         MVI     C,PRSTR
         CALL    BDOS
         JMP     0
+
+;-----------------------------------------------------------------------
+; SHOWIP -- ask FujiNet for its own address and print it. The command
+; is GET_ADAPTERCONFIG (0E8H) to the Fuji device (70H), no params. Its
+; reply payload is the firmware's packed AdapterConfig: ssid(33),
+; hostname(64), then the IP as 4 bytes at offset 97
+; (fujinet-firmware lib/device/fujiDevice/fujiDevice.h). The IP is
+; 0.0.0.0 when FujiNet's WiFi is not connected.
+;-----------------------------------------------------------------------
+SHOWIP: LXI     H,CTLBUF
+        MVI     M,FUJIDEV
+        INX     H
+        MVI     M,CMDACFG
+        LXI     H,CTLBUF+5
+        MVI     M,0
+        INX     H
+        CALL    NCTL
+        LDA     RXBUF+1
+        CPI     ACKCMD
+        JNZ     SIPNO
+        LXI     H,RXBUF+6+IPOFF
+        MOV     A,M
+        INX     H
+        ORA     M
+        INX     H
+        ORA     M
+        INX     H
+        ORA     M
+        JZ      SIPNC
+        LXI     D,MIP1          ; "Connect to N1:TNFS://"
+        MVI     C,PRSTR
+        CALL    BDOS
+        XRA     A
+        STA     IPIDX
+SIP1:   LDA     IPIDX           ; print byte IPIDX of the IP
+        MOV     E,A
+        MVI     D,0
+        LXI     H,RXBUF+6+IPOFF
+        DAD     D
+        MOV     L,M
+        MVI     H,0
+        CALL    PDEC
+        LDA     IPIDX
+        INR     A
+        STA     IPIDX
+        CPI     4
+        JZ      SIP2
+        MVI     E,'.'
+        MVI     C,CONOUT
+        CALL    BDOS
+        JMP     SIP1
+SIP2:   LXI     D,MIP2          ; "/"
+        JMP     SIPPR
+SIPNC:  LXI     D,MIPNC         ; no IP: WiFi not connected
+        JMP     SIPPR
+SIPNO:  LXI     D,MIPNO         ; NAK: this firmware did not answer
+SIPPR:  MVI     C,PRSTR
+        JMP     BDOS
 
 ;-----------------------------------------------------------------------
 ; LLOOP -- listening. STATUS connected=1 means a client is waiting.
@@ -2276,9 +2342,13 @@ KDOT:   LHLD    HPOSP
 SPEC:   DB      'N1:TCP://:16384/',0
 BADCH:  DB      '<>.,;:=?*[]/"',0     ; not allowed in a CP/M file name
 
-MBAN1:  DB      'TNFSD v0.3: serving drive $'
+MBAN1:  DB      'TNFSD v0.4: serving drive $'
 MBAN2:  DB      ': (user $'
 MBAN3:  DB      ') on TCP port 16384.',CR,LF,'$'
+MIP1:   DB      'Connect to N1:TNFS://$'
+MIP2:   DB      '/',CR,LF,'$'
+MIPNC:  DB      'FujiNet has no IP address -- is its WiFi connected?',CR,LF,'$'
+MIPNO:  DB      'FujiNet did not report its IP address.',CR,LF,'$'
 MSCAN2: DB      ' files cached. Ctrl-C quits.',CR,LF,'$'
 MFAIL:  DB      'TNFSD: FujiNet refused to listen (NAK).',CR,LF,'$'
 MCONN:  DB      'Client connected.',CR,LF,'$'
@@ -2308,6 +2378,7 @@ MQUIT:  DB      CR,LF,'TNFSD: closed.',CR,LF,'$'
 VARS:
 CURDSK: DS      1
 CURUSR: DS      1
+IPIDX:  DS      1               ; SHOWIP: which IP byte
 NXTSID: DS      2               ; the next session id
 CURSID: DS      2
 SIDOK:  DS      1               ; a session is mounted
