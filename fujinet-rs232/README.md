@@ -103,6 +103,12 @@ The web UI rewrites `fnconfig.ini` on the SD card live, as you change settings. 
 afterward if you want to confirm what actually landed. You can also keep a copy of your working
 config, for the next time you set one of these up.
 
+**Restart the adapter after you change the baud rate.** On our adapter (upstream build
+`9d3a081bd`), the web UI saved the new rate and showed it at once. But the adapter did not answer
+the CP/M tools until we removed and reapplied its power. Until then, the tools reported
+`destination server not responding`. The serial port probably kept the old rate until the
+restart; we did not confirm this.
+
 ## 5. Get the CP/M tool suite onto the machine
 
 This step is identical to the emulator case. See this repository's main

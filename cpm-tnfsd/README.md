@@ -43,8 +43,8 @@ Current version: `TNFSD` v0.4.
 - **FujiNet-PC.** On FujiNet-PC, TNFSD shows the wrong address, and only one
   copy can serve at a time. See [With FujiNet-PC](#with-fujinet-pc).
 - **Serial port.** TNFSD talks to the FujiNet through the 88-2SIO, unit b, at
-  ports `12H`/`13H`, like the other tools here. To change this, see section 5 of
-  the [main README](../README.md).
+  ports `12H`/`13H`, like the other tools here. To change this, see
+  [Adapting the tools to other serial hardware](../docs/adapting-to-hardware.md).
 
 ## Use it
 

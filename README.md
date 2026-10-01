@@ -82,7 +82,9 @@ verified end to end against a TNFS server running on actual Raspberry Pi hardwar
 LAN. This includes the mixed read-only/write-only permission layout described in
 `tnfsd-server-setup/`. **All three tools have also now been verified on a real physical
 FujiNet RS232 adapter on a real Altair 8800c.** See `fujinet-rs232/` for bring-up
-instructions. **Windows/Linux instructions for the emulator host side (FujiNet-PC) are not
+instructions. **All four tools also run on a non-Altair machine**: a CompuPro Interfacer 1 in
+a Z80 system, changed as described in [section 5](#5-adapting-to-different-hardware).
+**Windows/Linux instructions for the emulator host side (FujiNet-PC) are not
 written yet.** This project has only run FujiNet-PC on macOS so far. That is the one
 remaining open follow-up.
 
@@ -196,8 +198,9 @@ port = 10
 
 (`port = 10` is the 2SIO's usual base address. If yours is elsewhere, or you have more than
 one 2SIO, adjust `id`/`port` and the board id you reference below to match. Whatever board id
-you give this card is also the id the four programs need to know about; see "Adapting to
-different hardware" below.)
+you give this card is also the id the four programs need to know about. If you move the card
+to other ports, the programs need the new port addresses; see
+[section 5](#5-adapting-to-different-hardware).)
 
 That is the whole integration on the `altairsim` side. Boot the machine normally with
 FujiNet-PC already running, and `sio0:b` is live the moment CP/M starts. If you need to point
@@ -417,109 +420,16 @@ Open OK. Sending...
 
 ## 5. Adapting to different hardware
 
-All four of these programs (and `testing/NC.ASM`) talk **directly to I/O ports**, with no
-BDOS or BIOS indirection in between. That is deliberate, not an oversight. CP/M's BDOS console
-calls are wired to the one `CON:` device only, so there is no BDOS console call that reaches a
-*second* serial line.
+The tools talk to the FujiNet through an 88-2SIO, unit b, at ports `12H`/`13H`. They use the
+I/O ports directly, so a different serial board needs changes in the source:
 
-That means **the source is the config file**. If your hardware does not match this project's
-assumptions, you edit the `.ASM`, reassemble (`ASM FUJIGET` / `LOAD FUJIGET`, etc.), and you
-are done. There is no separate settings file, because CP/M's `ASM.COM` has no `INCLUDE`
-directive. Each `.ASM` carries its own copy of the three things below. If you change one,
-**change it in all of them** (including `testing/NC.ASM`, if you use it) and rebuild each one.
+- the port addresses,
+- the status bits, for any UART that is not a 6850,
+- the UART initialization, for any UART that is not a 6850.
 
-### 1. The port addresses
-
-Near the top of each `.ASM`, right after the CP/M equates:
-
-```asm
-;---- The 2SIO card, unit b ---------------------------------------------
-SIOST   EQU     12H             ; status (IN) / control (OUT)
-SIODT   EQU     13H             ; data, both ways
-SIORST  EQU     03H
-SIOCTL  EQU     15H
-```
-
-`SIOST`/`SIODT` are this project's default: the second unit of an 88-2SIO card at base port
-`10H` (unit `a` = `10H`/`11H`, the console; unit `b` = `12H`/`13H`, wired to FujiNet). If
-FujiNet is on a different card, a different unit, or a different base address on your
-hardware, **this is the only thing that needs to change** to point these tools at it. Nothing
-else in the file cares what the actual numbers are; they are used everywhere else only by
-name.
-
-### 2. The status-register bits
-
-Three small routines in each `.ASM` poll `SIOST` and test one bit at a time before moving a
-byte:
-
-```asm
-AO1:    IN      SIOST           ; wait for transmit-ready before OUT SIODT
-        ANI     02H
-        JZ      AO1
-
-ACIN:   IN      SIOST           ; wait for data-ready before IN SIODT
-        ANI     01H
-        JZ      ACIN
-```
-
-`FUJIGET`, `FUJIPUT`, and `FUJIDIR` also have `RPWAIT`, a timeout-aware variant of the same
-data-ready wait, tested the same way.
-
-`ANI 01H` tests bit 0: the 6850's RDRF flag (receive data register full, a byte is waiting).
-`ANI 02H` tests bit 1: the 6850's TDRE flag (transmit data register empty, ready for the next
-byte). These bit positions belong to the same chip as the control byte in section 3 below, not
-to this project's own choice.
-
-If your hardware uses a different UART (an 8251 USART, for example), its status register very
-likely puts these flags at different bit positions, or gives them different names. Check that
-chip's datasheet and change `01H`/`02H` at every `IN SIOST` site to match: `RPWAIT`, `AO1`, and
-`ACIN` in `FUJIGET.ASM`, `FUJIPUT.ASM`, and `FUJIDIR.ASM`, plus `AO1` and `ACIN` in
-`testing/NC.ASM` if you use it. Leaving these unchanged on non-6850 hardware does not fail
-cleanly: the program polls the wrong bit forever, or reads a bit that happens to be set for an
-unrelated reason and wrongly treats the port as ready.
-
-Relocating the bit is not always enough, either: check its **polarity**, not just its position.
-The 6850 is active-high, a set bit means ready, which is what `JZ AO1`/`JZ ACIN` above assume.
-Some UARTs are active-low instead: the MITS 88-SIO's COM2502, for one, signals ready with a
-**clear** bit. On a chip like that, changing `01H`/`02H` to the right bit is not enough. The
-branch has to flip too, `JZ` to `JNZ` and back, at every site listed above, or the program waits
-forever, or treats a not-ready port as ready, at the very bit position the datasheet says is
-correct.
-
-### 3. The UART initialization
-
-A few lines into each program's `START:`, before it does anything else with the port:
-
-```asm
-        MVI     A,SIORST        ; the ACIA out of reset...
-        OUT     SIOST
-        MVI     A,SIOCTL        ; ...and into a real operating mode
-        OUT     SIOST
-```
-
-This is specific to the **6850 ACIA** the 88-2SIO uses. Unlike boards such as the 88-SIO or
-88-ACR, whose word format is set by jumpers, baud-rate division, word format (data/parity/stop
-bits), and RTS/interrupt behavior are **registers the guest program writes**, not something
-fixed in hardware. `03H` is the 6850's master-reset code. `15H` (`00010101`) selects ÷16
-clocking with 8N1 framing and both interrupts left off, matched to the example `sio0` unit b
-in section 2 above, running at 9600 baud with no interrupts.
-
-If your hardware's serial interface **sets its format with jumpers or switches instead** (or
-uses some other chip entirely: an 8251 USART, a bit-banged port, whatever), **delete these
-four lines outright**. There is nothing for the guest to configure, and writing an ACIA-style
-control byte to a port that is not a 6850 could do something you do not want. If it is a 6850
-but at a different baud rate or word format, change `15H` to whatever control byte your setup
-needs. The two bits at the bottom select the clock divide, the next three select word format,
-and the top three control RTS and the two interrupt-enable bits. Any 6850 datasheet has the
-full table.
-
-### 4. The response-timeout budget
-
-Also worth knowing about while you are in there: `TOOUTR`, near the port equates, controls how
-long each program waits for a reply before reporting `destination server not responding` (see
-section 4 above). It is a busy-wait iteration count, not a real timer, so it scales with your
-actual CPU clock speed. If your machine is slower or faster than a stock 2MHz Altair, adjust
-it. You are not likely to need to touch it otherwise.
+[`docs/adapting-to-hardware.md`](docs/adapting-to-hardware.md) gives the full instructions, a
+list of every place to change in each file, and a worked example: a CompuPro Interfacer 1 in a
+Z80 system, with all four tools tested on the real machine.
 
 ---
 
