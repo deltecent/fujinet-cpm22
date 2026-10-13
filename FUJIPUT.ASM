@@ -1,5 +1,5 @@
 ;-----------------------------------------------------------------------
-; FUJIPUT.COM v1.4 -- send a file through FujiNet's N: network device.
+; FUJIPUT.COM v1.5 -- send a file through FujiNet's N: network device.
 ;
 ;       FUJIPUT file.ext N:<url> [B|T]     e.g.  FUJIPUT HELLO.TXT N1:TNFS://192.168.1.5/HELLO.TXT T
 ;
@@ -60,6 +60,18 @@
 ; every 8 records = 1024 bytes -- see PROGCK/SAYPROG below. Same
 ; technique as FUJIGET.ASM v1.4; see that file for the fuller comment.
 ;-----------------------------------------------------------------------
+; v1.5 (code review, 2026-10-13): every reply is now checked.
+; - Each WRITE's reply. A NAK (the server refused the data: full, a size
+;   limit, the connection dropped) stops the transfer, prints FujiNet's
+;   error code, and says the remote copy is incomplete. Before this,
+;   FUJIPUT printed "N records sent" for data the server had refused.
+; - The CLOSE reply: a NAK there also means the remote copy may be bad.
+; - RECVPK checks each reply's length and checksum, stops at the end of
+;   RXBUF, and times out between bytes (as FUJIGET v1.7).
+; - The "does it exist?" probe also asks STATUS: over HTTP an OPEN always
+;   ACKs, and only the STATUS error byte (0AAH = not found) tells.
+; - SPEC holds 250 characters: the CCP's longest command tail fits.
+;
 ; AND BDOS CLOBBERS EVERY REGISTER (A,B,C,D,E,H,L -- only SP survives).
 ;-----------------------------------------------------------------------
 ; Assemble it INSIDE the machine:
@@ -113,7 +125,10 @@ NETDEV  EQU     71H
 CMDOPEN EQU     4FH
 CMDCLOS EQU     43H
 CMDWRIT EQU     57H
+CMDSTAT EQU     53H
 ACKCMD  EQU     06H
+NSOK    EQU     01H             ; STATUS error byte: success
+NSEOF   EQU     88H             ; STATUS error byte: end of file
 
 ACCWR   EQU     08H             ; access mode: write only
 ACCRD   EQU     04H             ; access mode: read only (the probe)
@@ -129,7 +144,9 @@ SLPESC  EQU     0DBH
 SLPEEND EQU     0DCH
 SLPEESC EQU     0DDH
 
-SPECLEN EQU     100             ; room for SPEC, including the NUL
+SPECLEN EQU     250             ; room for SPEC, including the NUL (must
+                                ; stay under 256: it is an 8-bit count)
+RXSIZE  EQU     200             ; RXBUF: no reply here carries data
 JUNKLEN EQU     20              ; room to park the (unused) filename token
 
 ;=======================================================================
@@ -172,10 +189,20 @@ START:  LXI     SP,STACK
         CPI     ACKCMD
         JNZ     PABSENT         ; NAK -- nothing there, nothing to confirm
 
+        CALL    MKSTAT          ; v1.5: an HTTP OPEN always ACKs -- ask
+        CALL    SENDPK          ; STATUS too: 01H/88H = it is there,
+        CALL    RECVPK          ; anything else (0AAH not found) = not
+        LDA     RXBUF+9
+        STA     PRBST
         CALL    MKCLOSE         ; close the probe before asking
         CALL    SENDPK
         CALL    RECVPK
-        CALL    CKREPLACE       ; asks Y/N; exits the program if declined
+        LDA     PRBST
+        CPI     NSOK
+        JZ      PEXIST
+        CPI     NSEOF
+        JNZ     PABSENT
+PEXIST: CALL    CKREPLACE       ; asks Y/N; exits the program if declined
 
 PABSENT:
         CALL    MKOPEN
@@ -258,11 +285,10 @@ CPSEND: LDA     WLEN
 
         CALL    MKWRITE
         CALL    SENDPK
-        CALL    RECVPK          ; the WRITE's ACK -- not checked, same as
-                                ; NC.ASM's MLOOP: a dropped link shows up
-                                ; some other way, and this keeps the loop
-                                ; simple for what is otherwise a one-shot
-                                ; bulk transfer
+        CALL    RECVPK          ; v1.5: the WRITE's reply IS checked now --
+        LDA     RXBUF+1         ; a NAK means the server did not take
+        CPI     ACKCMD          ; this data (full, a size limit, the
+        JNZ     EWRNAK          ; connection dropped)
 
 CPCHK:  LDA     LASTFLG
         ORA     A
@@ -275,7 +301,64 @@ CPCHK:  LDA     LASTFLG
 PDONE:  CALL    MKCLOSE
         CALL    SENDPK
         CALL    RECVPK
+        LDA     RXBUF+1         ; v1.5: a failed CLOSE can lose data too
+        CPI     ACKCMD
+        JNZ     ECLNAK
         CALL    SAYDONE
+        JMP     0
+
+;-----------------------------------------------------------------------
+; EWRNAK -- a WRITE was refused. Ask STATUS for the reason, CLOSE, and
+; report it: the remote file holds only part of the data. ECLNAK -- the
+; CLOSE was refused: the same report.
+;-----------------------------------------------------------------------
+EWRNAK: CALL    MKSTAT
+        CALL    SENDPK
+        CALL    RECVPK
+        LDA     RXBUF+9
+        STA     ERRCD
+        CALL    MKCLOSE
+        CALL    SENDPK
+        CALL    RECVPK
+        JMP     ENREP
+ECLNAK: XRA     A               ; no code: CLOSE carries none
+        STA     ERRCD
+ENREP:  LXI     D,MWRNAK        ; "FUJIPUT: the server refused the data"
+        MVI     C,PRSTR
+        CALL    BDOS
+        LDA     ERRCD
+        ORA     A
+        JZ      ENR3
+        LXI     D,MERRC         ; " (FujiNet error "
+        MVI     C,PRSTR
+        CALL    BDOS
+        LDA     ERRCD
+        MOV     L,A
+        MVI     H,0
+        CALL    PRDEC
+        LXI     H,ERRTAB        ; a few codes get a meaning
+ENR1:   MOV     A,M
+        ORA     A
+        JZ      ENR2X            ; not in the table
+        INX     H
+        MOV     B,A
+        LDA     ERRCD
+        CMP     B
+        JZ      ENR2
+        INX     H
+        INX     H
+        JMP     ENR1
+ENR2:   MOV     E,M
+        INX     H
+        MOV     D,M
+        MVI     C,PRSTR
+        CALL    BDOS
+ENR2X:  MVI     E,')'
+        MVI     C,CONOUT
+        CALL    BDOS
+ENR3:   LXI     D,MINCMP        ; ". The remote file is incomplete."
+        MVI     C,PRSTR
+        CALL    BDOS
         JMP     0
 
 ABORT:  CALL    MKCLOSE
@@ -415,6 +498,19 @@ MKO1:   LDAX    D
 ; MKPROBE -- exactly MKOPEN, but read-only: the overwrite-existence
 ; check. Never touches the remote target, only asks whether it's there.
 ;-----------------------------------------------------------------------
+MKSTAT: LXI     H,TXBUF
+        MVI     M,NETDEV
+        INX     H
+        MVI     M,CMDSTAT
+        INX     H
+        INX     H
+        INX     H
+        INX     H
+        MVI     M,0
+        INX     H
+        LXI     D,TXBUF
+        JMP     SETLEN
+
 MKPROBE:LXI     H,TXBUF
         MVI     M,NETDEV
         INX     H
@@ -611,7 +707,12 @@ CK9:    MOV     A,D
 ;=======================================================================
 ; SENDING AND RECEIVING -- SLIP framing (verbatim from CPM Tools/NC.ASM)
 ;=======================================================================
-SENDPK: LDA     TXBUF+2
+SENDPK: IN      SIOST           ; v1.7: drop any stale byte first (a late
+        ANI     01H             ; reply would be read as the answer to
+        JZ      SPGO            ; this command -- manual 5.5)
+        IN      SIODT
+        JMP     SENDPK
+SPGO:   LDA     TXBUF+2
         MOV     C,A
         LDA     TXBUF+3
         MOV     B,A
@@ -647,10 +748,15 @@ SP9:    MVI     A,SLPEND
 ; RECVPK -- waits for the reply's leading SLPEND sync byte with a
 ; bounded busy-wait (TOOUTR outer passes x a full 16-bit inner
 ; countdown): if nothing at all comes back, print MNORE and quit rather
-; than hang forever. Once the sync byte is seen, the rest of the packet
-; is read with no further timeout -- a stall mid-packet, after real
-; framing has started, is a different (and much rarer) failure than
-; "no response at all," and out of scope here.
+; than hang forever.
+;
+; v1.7: the rest of the reply is read with ACINT, which gives up after
+; about 1.5 s with no byte (2 MHz), so a reply that stops part-way can
+; no longer hang the machine. RECVPK also stops at RXSIZE bytes (a lost
+; END byte used to run on into the variables), and checks what came:
+; at least the 6-byte header, a length field equal to the bytes
+; received, and the checksum (manual 4.3, 4.4). Any fault: MBADR and
+; out through FATAL. RXLEN = the reply's length.
 ;-----------------------------------------------------------------------
 RECVPK: MVI     A,TOOUTR
         STA     TOCNT
@@ -667,29 +773,93 @@ RPWAIT: IN      SIOST
         STA     TOCNT
         JNZ     RPSYNC
         CALL    SAYNORE         ; gave up -- no reply at all
-        JMP     0
+        JMP     FATAL
 
 RPGOTB: IN      SIODT
         CPI     SLPEND
         JNZ     RPSYNC          ; noise, not the sync byte -- keep waiting
         LXI     H,RXBUF
         LXI     B,0
-RP1:    CALL    ACIN
+RP1:    CALL    ACINT
+        JC      RPBAD           ; the reply stopped part-way
         CPI     SLPEND
         JZ      RP9
         CPI     SLPESC
         JNZ     RP3
-        CALL    ACIN
+        CALL    ACINT
+        JC      RPBAD
         CPI     SLPEEND
         JZ      RPQEND
+        CPI     SLPEESC
+        JNZ     RPBAD           ; ESC + anything else: a broken frame
         MVI     A,SLPESC
         JMP     RP3
 RPQEND: MVI     A,SLPEND
-RP3:    MOV     M,A
+RP3:    MOV     D,A             ; room left in RXBUF?
+        MOV     A,C
+        SUI     RXSIZE AND 0FFH
+        MOV     A,B
+        SBI     RXSIZE SHR 8
+        JNC     RPBAD           ; BC >= RXSIZE: too long
+        MOV     M,D
         INX     H
         INX     B
         JMP     RP1
-RP9:    RET
+
+RP9:    MOV     A,B             ; an END with nothing before it: that
+        ORA     C               ; was an opening END -- keep reading
+        JZ      RP1
+        MOV     H,B
+        MOV     L,C
+        SHLD    RXLEN
+        MOV     A,C             ; at least the 6-byte header?
+        SUI     6
+        MOV     A,B
+        SBI     0
+        JC      RPBAD
+        LDA     RXBUF+2         ; the length field = bytes received?
+        CMP     C
+        JNZ     RPBAD
+        LDA     RXBUF+3
+        CMP     B
+        JNZ     RPBAD
+        LDA     RXBUF+4         ; the checksum, taken with byte 4 = 0
+        STA     RXCK
+        XRA     A
+        STA     RXBUF+4
+        LXI     H,RXBUF
+        CALL    CKSUM           ; BC = RXLEN still
+        MOV     B,A
+        LDA     RXCK
+        STA     RXBUF+4
+        CMP     B
+        RZ
+RPBAD:  CALL    SAYBADR
+        JMP     FATAL
+
+;-----------------------------------------------------------------------
+; ACINT -- ACIN with a time limit: CY set if no byte came within a full
+; 16-bit countdown (about 1.5 s at 2 MHz). Keeps B, C, H, L.
+;-----------------------------------------------------------------------
+ACINT:  LXI     D,0
+AI1:    IN      SIOST
+        ANI     01H
+        JNZ     AI2
+        DCX     D
+        MOV     A,D
+        ORA     E
+        JNZ     AI1
+        STC
+        RET
+AI2:    IN      SIODT
+        ORA     A               ; CY=0
+        RET
+
+;-----------------------------------------------------------------------
+; FATAL -- the line to FujiNet failed. Exit: there is
+; no point in sending FujiNet anything more.
+;-----------------------------------------------------------------------
+FATAL:  JMP     0               ; FUJIPUT has no local file to clean up
 
 ACOUT:  PUSH    PSW
 AO1:    IN      SIOST
@@ -847,6 +1017,10 @@ SAYBAD: LXI     D,MBADP
         MVI     C,PRSTR
         JMP     BDOS
 
+SAYBADR:LXI     D,MBADR
+        MVI     C,PRSTR
+        JMP     BDOS
+
 SAYABRT:LXI     D,MABRT
         MVI     C,PRSTR
         JMP     BDOS
@@ -929,7 +1103,43 @@ MDENY:  DB      CR,LF,'FUJIPUT: denied (permission or server'
         DB      ' restriction).',CR,LF,'$'
 MBADP:  DB      CR,LF,'FUJIPUT: failed -- parent path does not'
         DB      ' exist.',CR,LF,'$'
-MABRT:  DB      CR,LF,'FUJIPUT: aborted.',CR,LF,'$'
+MABRT:  DB      CR,LF,'FUJIPUT: aborted. The remote file is incomplete.',CR,LF,'$'
+MBADR:  DB      CR,LF,'FUJIPUT: damaged or incomplete reply from'
+        DB      ' FujiNet.',CR,LF,'$'
+MWRNAK: DB      CR,LF,'FUJIPUT: the server refused the data$'
+MERRC:  DB      ' (FujiNet error $'
+MINCMP: DB      '.',CR,LF,'The remote file is incomplete.',CR,LF,'$'
+MEFNF:  DB      ' (not found)$'
+MEDEN:  DB      ' (access denied)$'
+MECONN: DB      ' (could not connect)$'
+METIME: DB      ' (timeout)$'
+MESRV:  DB      ' (server error)$'
+MECLI:  DB      ' (bad request)$'
+MEGEN:  DB      ' (general error)$'
+
+; ERRTAB -- STATUS error codes that ENERR names: code, then the message
+; address. Ends with 0. Codes from the RS-232 FujiNet User's Manual, 9.12.
+ERRTAB: DB      0AAH
+        DW      MEFNF
+        DB      0A7H
+        DW      MEDEN
+        DB      0C8H
+        DW      MECONN
+        DB      0C9H
+        DW      MECONN
+        DB      0CFH
+        DW      MECONN
+        DB      08AH
+        DW      METIME
+        DB      0CAH
+        DW      METIME
+        DB      0D7H
+        DW      MESRV
+        DB      0D6H
+        DW      MECLI
+        DB      090H
+        DW      MEGEN
+        DB      0
 MNOCPM: DB      CR,LF,'FUJIPUT: no such CP/M file.',CR,LF,'$'
 MRECS:  DB      ' records sent.',CR,LF,'$'
 MEXIST: DB      CR,LF,'FUJIPUT: $'
@@ -940,7 +1150,7 @@ MEBADSW:DB      CR,LF,'FUJIPUT: the switch is B (every byte, the default) or'
 MPROGP: DB      'Sent $'
 MPROGS: DB      ' KB...$'
 
-MUSAGE: DB      CR,LF,'FUJIPUT v1.4 -- send a file through FujiNet''s'
+MUSAGE: DB      CR,LF,'FUJIPUT v1.5 -- send a file through FujiNet''s'
         DB      ' N: network device.',CR,LF,CR,LF
         DB      '   FUJIPUT file.ext N:<url> [B|T]',CR,LF,CR,LF
         DB      'Example',CR,LF
@@ -966,9 +1176,13 @@ RECS:   DS      2
 KCNT:   DS      2
 WLEN:   DS      2
 LASTFLG:DS      1
+PRBST:  DS      1               ; v1.5: the probe's STATUS error byte
+ERRCD:  DS      1               ; v1.5: the code ENREP prints
+RXLEN:  DS      2               ; v1.5: the last reply's length
+RXCK:   DS      1               ; v1.5: its checksum byte, while checking
 
-TXBUF:  DS      200
-RXBUF:  DS      200
+TXBUF:  DS      SPECLEN+20      ; an OPEN: 8-byte header + SPEC
+RXBUF:  DS      RXSIZE
 NUMEND: DS      1
 
         DS      64              ; stack

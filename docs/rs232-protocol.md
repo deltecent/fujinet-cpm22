@@ -161,11 +161,20 @@ local echo server over a real internet host to keep the test self-contained:
   the wire (`13 00 01 01`) and from FujiNet's own log line for that call:
   `rs232_status_channel() - BW: 19 C: 1 E: 1`. By Atari convention, `error=1` means "no
   error", i.e. success.
-- **`NETCMD_READ`** takes 1 param, the requested length in 2 bytes. Its response payload is
-  **exactly the requested length**: real data first, then uninitialized or leftover buffer
-  bytes as padding. Use `STATUS`'s `bytes_waiting` to know how much of the response is real.
-  Do not trust the full response length as "bytes received." Confirmed: a request for 64
-  bytes returned `ECHO:hello fujinet\n` (19 real bytes) plus 45 bytes of buffer garbage.
+- **`NETCMD_READ`** takes 1 param, the requested length in 2 bytes. On the August 2026 build
+  tested here, its response payload was **exactly the requested length**: real data first,
+  then leftover buffer bytes as padding (a request for 64 bytes returned
+  `ECHO:hello fujinet\n`, 19 real bytes, plus 45 bytes of garbage). **The current build does
+  not pad** (tested 2026-10-13, FujiNet-PC `8f7231a78`: a READ for 100 bytes more than
+  `bytes_waiting` returned only the real 5248 bytes; source `NDevice::fujidev_read` sends what
+  the protocol read). Safe for both: ask for at most `bytes_waiting`, and take the length of
+  the data from the reply's own length field. A READ that fails is answered with a NAK.
+- **`STATUS`'s error byte matters.** `01` = success, `88H` = end of file. After an OPEN, FujiNet
+  reports later failures here, for example `0AAH` (not found, also an HTTP 404), `0CFH` (not
+  connected: nothing listens at the host and port), `90H` (general error, e.g. a server that
+  refused a write). An HTTP OPEN always ACKs (HTTP connects at the first STATUS), so for HTTP
+  this byte is the only place a failure shows. The tools stop on any other value (FUJIGET
+  v1.7, FUJIPUT v1.5, FUJIDIR v1.7, WGET v1.3).
 - **`NETCMD_CLOSE`** takes zero params. It returns **ACK**.
 
 This closes the two gaps below for the network-device path. **`FUJICMD_MOUNT_HOST`/
@@ -195,8 +204,10 @@ untested; see below.)
 `FUJICMD_OPEN_DIRECTORY`/`READ_DIR_ENTRY` at all (these remain unverified, below). It can
 open read-only first: the ACK or NAK tells you whether the target exists. Then it closes,
 and opens for real. This only answers "does a file/URL exist" for backends where a
-read-open has that meaning: TNFS, SD, HTTP GET. It says nothing for a raw `TCP://` stream,
-which has no concept of file existence.
+read-open has that meaning: TNFS and SD. **Not HTTP:** an HTTP OPEN ACKs even for a missing
+file or a dead port (corrected 2026-10-13), so FUJIPUT v1.5 follows the probe with a STATUS and
+treats error `0AAH` as "not there". It says nothing for a raw `TCP://` stream, which has no
+concept of file existence.
 
 ## Traced from source, then verified live (2026-08-30): `NETCMD_MKDIR`/`RMDIR` payload shape
 

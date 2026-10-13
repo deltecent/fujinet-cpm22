@@ -1,5 +1,5 @@
 ;-----------------------------------------------------------------------
-; TNFSD.COM v0.4 -- a TNFS server for CP/M 2.2, through FujiNet.
+; TNFSD.COM v0.5 -- a TNFS server for CP/M 2.2, through FujiNet.
 ;
 ;       TNFSD                   serve the current drive, current user
 ;
@@ -55,6 +55,18 @@
 ;       ASM TNFSD               -> TNFSD.HEX
 ;       LOAD TNFSD              -> TNFSD.COM
 ;
+; v0.5 (code review, 2026-10-13):
+; - RECVPK no longer waits for ever. If FujiNet sends nothing for about
+;   20 s (2 MHz), or stops part-way through a reply, or a reply is too
+;   long or fails its length or checksum check, TNFSD says so, closes
+;   its files and exits. Before, a FujiNet that stopped answering hung
+;   the machine, and Ctrl-C could not stop it.
+; - A client that reconnects at once no longer wedges TNFSD (see CIDLE).
+; - An upload that creates or replaces a file goes to NAME.$$$. Only the
+;   client's CLOSE erases the old NAME and renames NAME.$$$ to it. If the
+;   client disconnects first, or Ctrl-C is pressed, NAME.$$$ is erased
+;   and the old file stays as it was.
+;
 ; THIS PROGRAM TALKS DIRECTLY TO THE 2SIO CARD FOR FUJINET, and to BDOS
 ; for files and the console. BDOS CLOBBERS EVERY REGISTER (A,B,C,D,E,
 ; H,L -- only SP survives). Nothing may be left live across CALL BDOS.
@@ -80,6 +92,7 @@ GETUSR  EQU     32              ; E=0FFH: A = current user
 RDRAN   EQU     33              ; read random: A<>0 = no data there
 WRRAN   EQU     34              ; write random: A<>0 = error (disk full, ...)
 FSIZE   EQU     35              ; FCB r0-r2 = size in records
+FRENAM  EQU     23              ; DE = FCB: old name at 0, new name at 16
 
 CR      EQU     0DH
 LF      EQU     0AH
@@ -120,6 +133,9 @@ SLPEEND EQU     0DCH
 SLPEESC EQU     0DDH
 
 NETMAX  EQU     512             ; largest single FujiNet READ
+RXSIZE  EQU     NETMAX+16       ; RXBUF
+TOOUTR  EQU     10              ; RECVPK: outer passes of a 16-bit wait,
+                                ; about 20 s at 2 MHz (less if faster)
 
 ;---- TNFS --------------------------------------------------------------
 TMOUNT  EQU     00H
@@ -163,6 +179,7 @@ DIRMAX  EQU     255             ; files the directory cache holds
 DIRENT  EQU     13              ; table entry: name(11) + records(2)
 DXPER   EQU     16              ; entries per READDIRX reply
 RXQMAX  EQU     1100            ; the TCP stream queue
+IDLMAX  EQU     8               ; quiet polls before the ACCEPT check
 
 ;=======================================================================
 ; MAIN
@@ -309,7 +326,8 @@ LLOOP:  CALL    CKCTLC
         LDA     RXBUF+1
         CPI     ACKCMD
         JNZ     LLOOP           ; it went away again
-        XRA     A               ; a fresh session
+LACPT:  XRA     A               ; a fresh session
+        STA     IDLEN
         STA     SIDOK
         STA     LASTV
         STA     DIROPN
@@ -334,6 +352,8 @@ CLOOP:  CALL    CKCTLC
         MOV     A,H
         ORA     L
         JZ      CIDLE
+        XRA     A
+        STA     IDLEN
         CALL    FILLQ
         CALL    PROCQ
         LDA     PERR
@@ -342,8 +362,33 @@ CLOOP:  CALL    CKCTLC
         JMP     CLOOP
 CIDLE:  LDA     RXBUF+8
         ORA     A
-        JNZ     CLOOP
-        LXI     D,MCLOSE        ; the client closed
+        JZ      CGONE
+;---- v0.5: "nothing waiting, connected" is ambiguous. Once our client
+;---- has gone, FujiNet's TCP server reports connected = "a NEW client
+;---- is waiting" (fujinet-firmware TCP.cpp, status_server). A client
+;---- that reconnected at once then wedged TNFSD on the dead connection
+;---- (v0.4 too). So after IDLMAX quiet polls, try ACCEPT: a NAK means no
+;---- one else is waiting (our client is still there); an ACK means the
+;---- new client has replaced the old one -- end that session, start one.
+        LDA     IDLEN
+        INR     A
+        STA     IDLEN
+        CPI     IDLMAX
+        JC      CLOOP
+        XRA     A
+        STA     IDLEN
+        MVI     A,CMDACPT
+        CALL    NBARE
+        LDA     RXBUF+1
+        CPI     ACKCMD
+        JNZ     CLOOP           ; no one new: our client is still there
+        CALL    CLSALL          ; the old client is gone: as ENDCL, but
+        CALL    SUMMRY          ; the new one is already accepted
+        LXI     D,MCLOSE
+        MVI     C,PRSTR
+        CALL    BDOS
+        JMP     LACPT
+CGONE:  LXI     D,MCLOSE        ; the client closed
         JMP     ENDCL
 CPERR:  LXI     D,MPERR         ; a request we can't parse -- drop it
 ENDCL:  PUSH    D               ; close files first: that ends any
@@ -884,6 +929,9 @@ DOP1:   MOV     A,M
 DOP2:   MOV     A,B
         CALL    SETH
         CALL    TFCBH           ; the handle's FCB = TFCB
+        LXI     H,HTMP          ; v0.5: not a NAME.$$$ upload (yet)
+        CALL    HIDX
+        MVI     M,0
         LHLD    HPOSP           ; position 0
         XRA     A
         MOV     M,A
@@ -913,13 +961,33 @@ DOPW:   MVI     C,FOPEN         ; for writing
         LDA     RXQ+5
         ANI     OTRUNC
         JZ      DOPAPP
-        MVI     C,FDEL          ; truncate: delete, then make it again
+                                ; truncate: v0.5 writes NAME.$$$ instead
+DOPMK:  CALL    TFCBH           ; the handle's FCB = TFCB again...
+        LHLD    HFCBP           ; ...with the type $$$
+        LXI     D,9
+        DAD     D
+        MVI     M,'$'
+        INX     H
+        MVI     M,'$'
+        INX     H
+        MVI     M,'$'
+        MVI     C,FDEL          ; an old NAME.$$$: gone
         CALL    BDOSH
-        CALL    TFCBH
-DOPMK:  MVI     C,FMAKE
+        MVI     C,FMAKE
         CALL    BDOSH
         INR     A
         JZ      DOPFUL
+        LXI     H,HTMP          ; CLS1 renames it to NAME (TFCB, kept in
+        CALL    HIDX            ; HREAL) on a clean CLOSE
+        MVI     M,1
+        LDA     CURH
+        LXI     H,HREAL
+        LXI     D,12
+        CALL    MULADD
+        XCHG
+        LXI     H,TFCB
+        LXI     B,12
+        CALL    MOVE
 DOPAPP: LDA     RXQ+4           ; APPEND: start at the end
         ANI     OAPPEND
         JZ      DOPWOK
@@ -959,8 +1027,7 @@ DOPOK:  MOV     B,A             ; B = writable
         LXI     D,MRECV
 DOPM:   MVI     C,PRSTR
         CALL    BDOS
-        LHLD    HFCBP
-        INX     H
+        LXI     H,TFCB+1        ; v0.5: the real name, not NAME.$$$
         CALL    PNAME
         MVI     E,' '
         MVI     C,CONOUT
@@ -975,7 +1042,6 @@ DOPM:   MVI     C,PRSTR
 DOPNEW: LDA     RXQ+5           ; not there: create it only if asked
         ANI     OCREATE
         JZ      DOPNO
-        CALL    TFCBH
         JMP     DOPMK
 DOPNO:  LXI     H,TFCB+1        ; for SUMMRY: "NAME: not found."
         LXI     D,NFNAME
@@ -1161,6 +1227,8 @@ DCLOSE: CALL    GETH
         MVI     B,'C'
         MVI     A,EBADF
         JC      REPST
+        MVI     A,1             ; v0.5: the client closed it -- keep it
+        STA     CLSOK
         CALL    CLS1
         MVI     B,'C'
         JMP     REPST           ; A = the status from CLS1
@@ -1183,9 +1251,63 @@ CLS1:   LXI     H,HUSED
         MVI     C,FCLOSE
         CALL    BDOSH
         INR     A
+        JNZ     CLTMP
+        MVI     A,EIO
+        STA     CLSST
+CLTMP:  LXI     H,HTMP          ; v0.5: a NAME.$$$ upload?
+        CALL    HIDX
+        MOV     A,M
+        MVI     M,0
+        ORA     A
+        JZ      CL1
+        LDA     CLSST           ; closed cleanly, and by the client?
+        ORA     A
+        JNZ     CLDROP
+        LDA     CLSOK
+        ORA     A
+        JZ      CLDROP
+        LDA     CURH            ; yes: RENFCB = NAME.$$$ (0), NAME (16)
+        LXI     H,HREAL
+        LXI     D,12
+        CALL    MULADD
+        SHLD    SPTR
+        XCHG                    ; DE = HREAL entry
+        LXI     H,RENFCB+16
+        XCHG
+        LXI     B,12
+        CALL    MOVE
+        LHLD    HFCBP
+        LXI     D,RENFCB
+        LXI     B,12
+        CALL    MOVE
+        LXI     H,RENFCB+12
+        MVI     B,4
+CLZ1:   MVI     M,0
+        INX     H
+        DCR     B
+        JNZ     CLZ1
+        LXI     H,RENFCB+28
+        MVI     B,8
+CLZ2:   MVI     M,0
+        INX     H
+        DCR     B
+        JNZ     CLZ2
+        LHLD    SPTR            ; erase the old NAME...
+        XCHG
+        MVI     C,FDEL
+        CALL    BDOS
+        LXI     D,RENFCB        ; ...and rename NAME.$$$ to it
+        MVI     C,FRENAM
+        CALL    BDOS
+        INR     A
         JNZ     CL1
         MVI     A,EIO
         STA     CLSST
+        JMP     CL1
+CLDROP: MVI     C,FDEL          ; interrupted: erase NAME.$$$, keep NAME
+        CALL    BDOSH
+        MVI     A,1
+        STA     CLINTR
 CL1:    LHLD    HPOSP           ; the position = bytes sent or received
         MOV     A,M
         STA     NUM24
@@ -1202,8 +1324,14 @@ CL1:    LHLD    HPOSP           ; the position = bytes sent or received
         LXI     D,MBYTES
         LDA     CLSST
         ORA     A
-        JZ      CL2
+        JZ      CL1B
         LXI     D,MCFAIL
+CL1B:   LDA     CLINTR          ; v0.5: an upload that did not finish
+        ORA     A
+        JZ      CL2
+        XRA     A
+        STA     CLINTR
+        LXI     D,MINTR
 CL2:    MVI     C,PRSTR
         CALL    BDOS
         LDA     CLSST
@@ -1211,7 +1339,8 @@ CL2:    MVI     C,PRSTR
 
 ; CLSALL -- close every open handle, forget the directory listing.
 CLSALL: XRA     A
-        STA     DIROPN
+        STA     CLSOK           ; v0.5: not the client's CLOSE -- uploads
+        STA     DIROPN          ; still on NAME.$$$ are dropped
 CA1:    STA     CAIDX
         LXI     H,HUSED
         MOV     E,A
@@ -2100,8 +2229,14 @@ CS2:    MOV     D,A
 CS9:    MOV     A,D
         RET
 
-; SENDPK -- HL = a packet: SLIP-frame and transmit it.
-SENDPK: SHLD    PKST
+; SENDPK -- HL = a packet: SLIP-frame and transmit it. v0.5: first drop
+; any stale byte, so a late reply is not read as this command's answer.
+SENDPK: IN      SIOST
+        ANI     01H
+        JZ      SPGO
+        IN      SIODT
+        JMP     SENDPK
+SPGO:   SHLD    PKST
         INX     H
         INX     H
         MOV     C,M
@@ -2136,24 +2271,103 @@ SP9:    MVI     A,SLPEND
         JMP     ACOUT
 
 ; RECVPK -- read one SLIP frame into RXBUF, decoding as it goes.
-RECVPK: CALL    ACIN
+; v0.5: bounded in time and size, and checked. TOOUTR passes of a 16-bit
+; wait for the first byte, then ACINT (about 1.5 s) between bytes; at
+; most RXSIZE bytes; the length field must equal the bytes received and
+; the checksum must be right. Any fault goes to RPDEAD: the line to
+; FujiNet is gone, so close the files and exit.
+RECVPK: MVI     A,TOOUTR
+        STA     TOCNT
+RPSYNC: LXI     B,0
+RPWAIT: IN      SIOST
+        ANI     01H
+        JNZ     RPGOTB
+        DCX     B
+        MOV     A,B
+        ORA     C
+        JNZ     RPWAIT
+        LDA     TOCNT
+        DCR     A
+        STA     TOCNT
+        JNZ     RPSYNC
+        JMP     RPDEAD          ; nothing at all
+RPGOTB: IN      SIODT
         CPI     SLPEND
-        JNZ     RECVPK          ; discard anything before the opening 0C0H
+        JNZ     RPSYNC          ; discard anything before the opening 0C0H
         LXI     H,RXBUF
-RP1:    CALL    ACIN
+        LXI     B,0
+RP1:    CALL    ACINT
+        JC      RPDEAD
         CPI     SLPEND
-        RZ                      ; the closing delimiter
+        JZ      RP9             ; the closing delimiter
         CPI     SLPESC
         JNZ     RP3
-        CALL    ACIN
+        CALL    ACINT
+        JC      RPDEAD
         CPI     SLPEEND
         JZ      RPQEND
-        MVI     A,SLPESC        ; anything else after ESC: treat as 0DBH
+        CPI     SLPEESC
+        JNZ     RPDEAD          ; ESC + anything else: a broken frame
+        MVI     A,SLPESC
         JMP     RP3
 RPQEND: MVI     A,SLPEND
-RP3:    MOV     M,A
+RP3:    MOV     D,A
+        MOV     A,C             ; room left?
+        SUI     RXSIZE AND 0FFH
+        MOV     A,B
+        SBI     RXSIZE SHR 8
+        JNC     RPDEAD
+        MOV     M,D
         INX     H
+        INX     B
         JMP     RP1
+RP9:    MOV     A,B             ; an END with nothing before it: an
+        ORA     C               ; opening END -- keep reading
+        JZ      RP1
+        MOV     A,C             ; at least the 6-byte header?
+        SUI     6
+        MOV     A,B
+        SBI     0
+        JC      RPDEAD
+        LDA     RXBUF+2         ; the length field = bytes received?
+        CMP     C
+        JNZ     RPDEAD
+        LDA     RXBUF+3
+        CMP     B
+        JNZ     RPDEAD
+        LDA     RXBUF+4         ; the checksum, with byte 4 taken as 0
+        STA     RXCK
+        XRA     A
+        STA     RXBUF+4
+        LXI     H,RXBUF
+        CALL    CKSUM
+        MOV     B,A
+        LDA     RXCK
+        STA     RXBUF+4
+        CMP     B
+        RZ
+RPDEAD: LXI     SP,STACK        ; we may be deep in a request: start clean
+        CALL    CLSALL          ; uploads in progress keep the old file
+        LXI     D,MDEAD
+        MVI     C,PRSTR
+        CALL    BDOS
+        JMP     0
+
+; ACINT -- ACIN with a time limit: CY set if no byte came within a full
+; 16-bit countdown (about 1.5 s at 2 MHz). Keeps B, C, H, L.
+ACINT:  LXI     D,0
+AI1:    IN      SIOST
+        ANI     01H
+        JNZ     AI2
+        DCX     D
+        MOV     A,D
+        ORA     E
+        JNZ     AI1
+        STC
+        RET
+AI2:    IN      SIODT
+        ORA     A               ; CY=0
+        RET
 
 ; ACOUT -- send A, waiting for TDRE. ACIN -- receive into A.
 ACOUT:  PUSH    PSW
@@ -2342,7 +2556,7 @@ KDOT:   LHLD    HPOSP
 SPEC:   DB      'N1:TCP://:16384/',0
 BADCH:  DB      '<>.,;:=?*[]/"',0     ; not allowed in a CP/M file name
 
-MBAN1:  DB      'TNFSD v0.4: serving drive $'
+MBAN1:  DB      'TNFSD v0.5: serving drive $'
 MBAN2:  DB      ': (user $'
 MBAN3:  DB      ') on TCP port 16384.',CR,LF,'$'
 MIP1:   DB      'Connect to N1:TNFS://$'
@@ -2357,6 +2571,8 @@ MPERR:  DB      'Unreadable request -- client dropped.',CR,LF,'$'
 MSEND:  DB      '  Sending $'
 MRECV:  DB      '  Receiving $'
 MBYTES: DB      ' bytes.',CR,LF,'$'
+MINTR:  DB      ' bytes -- upload not finished, the old file is kept.',CR,LF,'$'
+MDEAD:  DB      CR,LF,'TNFSD: FujiNet stopped answering. Closed.',CR,LF,'$'
 MCFAIL: DB      ' bytes -- CLOSE FAILED, the file may be incomplete.',CR,LF,'$'
 MWFULL: DB      ' -- disk full!',CR,LF,'$'
 MNOCR:  DB      '  Can''t create $'
@@ -2429,16 +2645,24 @@ DIRN:   DS      1
 DIRI:   DS      1
 DIRP:   DS      2
 DECBUF: DS      8
+TOCNT:  DS      1               ; v0.5: RECVPK's outer count
+IDLEN:  DS      1               ; v0.5: quiet polls in a row (CLOOP)
+RXCK:   DS      1               ; v0.5: a reply's checksum, while checking
+CLSOK:  DS      1               ; v0.5: 1 = CLS1 is the client's CLOSE
+CLINTR: DS      1               ; v0.5: CLS1 dropped an upload
+HTMP:   DS      NHAND           ; v0.5: 1 = the handle writes NAME.$$$
 VARSEND:
 
 TFCB:   DS      FCBLEN          ; the file a request names
 SFCB:   DS      FCBLEN          ; the directory search pattern
 HFCB:   DS      NHAND*FCBLEN    ; one FCB per handle
+HREAL:  DS      NHAND*12        ; v0.5: drive+name each NAME.$$$ becomes
+RENFCB: DS      36              ; v0.5: BDOS 23's old+new name pair
 DMABUF: DS      128
 CTLBUF: DS      48
 TXBUF:  DS      8+4+1+2+MAXIO+8 ; header, TNFS header, status, len, data
 REPLY   EQU     TXBUF+8
-RXBUF:  DS      NETMAX+16
+RXBUF:  DS      RXSIZE
 RXQ:    DS      RXQMAX
 DIRTAB: DS      DIRMAX*DIRENT   ; the directory cache
 DIRSEL: DS      DIRMAX          ; OPENDIRX's picks: indexes into DIRTAB

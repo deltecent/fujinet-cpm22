@@ -1,5 +1,5 @@
 ;-----------------------------------------------------------------------
-; WGET.COM v1.2 -- fetch a file through FujiNet's N: network device,
+; WGET.COM v1.3 -- fetch a file through FujiNet's N: network device,
 ; prompting for the URL instead of taking it on the command line.
 ;
 ;       WGET file.ext
@@ -51,6 +51,12 @@
 ; as many 128-byte records as it takes, flushing each as it fills.
 ;
 ;-----------------------------------------------------------------------
+; v1.3 (code review, 2026-10-13): the same changes as FUJIGET v1.7.
+; Every reply is checked (length, checksum, a NAK to READ, and the
+; STATUS error byte), RECVPK times out between bytes, and the data goes
+; to NAME.$$$ until a clean end of file. An HTTP 404 now gives "error
+; 170 (not found)" and saves nothing. URLs up to 248 characters.
+;
 ; AND BDOS CLOBBERS EVERY REGISTER (A,B,C,D,E,H,L -- only SP survives).
 ; Nothing may be left live in a register across CALL BDOS.
 ;-----------------------------------------------------------------------
@@ -71,6 +77,7 @@ FDELET  EQU     19
 FWRITE  EQU     21              ; write sequential
 FMAKE   EQU     22
 FSETDMA EQU     26
+FRENAM  EQU     23              ; DE = FCB: old name at 0, new name at 16
 RDCON   EQU     1               ; console input, echoed
 SFIRST  EQU     17              ; search first -- read-only, doesn't touch the dir
 
@@ -106,6 +113,8 @@ CMDCLOS EQU     43H
 CMDREAD EQU     52H
 CMDSTAT EQU     53H
 ACKCMD  EQU     06H
+NSOK    EQU     01H             ; STATUS error byte: success
+NSEOF   EQU     88H             ; STATUS error byte: end of file
 
 ACCRD   EQU     04H             ; access mode: read only
 TRANONE EQU     00H             ; translation: none (binary)
@@ -120,13 +129,17 @@ SLPESC  EQU     0DBH
 SLPEEND EQU     0DCH
 SLPEESC EQU     0DDH
 
-SPECLEN EQU     100             ; room for SPEC, including the NUL
+SPECLEN EQU     250             ; room for SPEC, including the NUL (must
+                                ; stay under 256: it is an 8-bit count)
 NAMLEN  EQU     20              ; room for NAME, including the NUL
+RXSIZE  EQU     MAXREAD+20      ; RXBUF: header + up to MAXREAD of payload
 
 ;=======================================================================
 ; MAIN
 ;=======================================================================
 START:  LXI     SP,STACK
+        XRA     A
+        STA     FMADE           ; no NAME.$$$ yet (DS memory is not zeroed)
 
         CALL    PARSE           ; tail -> NAME (the local filename)
         LDA     NAME
@@ -160,15 +173,20 @@ START:  LXI     SP,STACK
         CALL    SAYOK
 
 ;---- Only now touch the CP/M file -- the network side is proven open ---
-        LXI     D,FCB
+;---- v1.3: the data goes to NAME.$$$ (TFCB). NAME itself is not touched
+;---- until RCLOSE, after a clean end of file.
+        CALL    MKTMP           ; TFCB = FCB with the type $$$
+        LXI     D,TFCB
         MVI     C,FDELET
-        CALL    BDOS            ; 0FFH = there wasn't one, fine
+        CALL    BDOS            ; a NAME.$$$ left over from before: gone
 
-        LXI     D,FCB
+        LXI     D,TFCB
         MVI     C,FMAKE
         CALL    BDOS
         CPI     0FFH
         JZ      ENODIR          ; directory full
+        MVI     A,1
+        STA     FMADE           ; DROPT now has a file to erase
 
         LXI     D,BUF
         MVI     C,FSETDMA
@@ -213,6 +231,7 @@ RCHECK: LHLD    KNOWNBW
 RPOLL:  CALL    MKSTAT
         CALL    SENDPK
         CALL    RECVPK
+        CALL    CHKST           ; a NAK or an error byte: stop here
 
         LDA     RXBUF+6         ; bytes_waiting, lo
         STA     KNOWNBW
@@ -242,6 +261,28 @@ RQMAX:  LXI     H,MAXREAD
 RQGO:   CALL    MKREAD
         CALL    SENDPK
         CALL    RECVPK
+        LDA     RXBUF+1         ; v1.3: a NAK carries no data
+        CPI     ACKCMD
+        JNZ     EREAD
+
+;---- v1.3: use the length the reply really carries (RXLEN - 6). It must
+;---- be 1..REQLEN; REQLEN then becomes it, so KNOWNBW below goes down by
+;---- what really arrived.
+        LHLD    RXLEN
+        LXI     D,0-6
+        DAD     D               ; HL = payload length (RECVPK checked >= 6)
+        MOV     A,H
+        ORA     L
+        JZ      EREAD           ; an empty ACK to a READ: treat as a failure
+        XCHG                    ; DE = payload length
+        LHLD    REQLEN
+        MOV     A,L
+        SUB     E
+        MOV     A,H
+        SBB     D               ; CY set if REQLEN < payload length
+        JC      EREAD           ; more than we asked for: not a real reply
+        XCHG
+        SHLD    REQLEN
 
 ;---- copy REQLEN bytes from RXBUF+6 into CP/M records, a record at a --
 ;---- time -- since REQLEN can now exceed 128, this may flush more     -
@@ -355,11 +396,24 @@ RCLOSE: CALL    MKCLOSE
         CALL    SENDPK
         CALL    RECVPK
 
-        LXI     D,FCB
+        LXI     D,TFCB
         MVI     C,FCLOSE
         CALL    BDOS
         CPI     0FFH
         JZ      ECLOSE
+
+;---- v1.3: a clean end of file -- only now replace NAME with NAME.$$$ --
+        LXI     D,FCB
+        MVI     C,FDELET
+        CALL    BDOS            ; the old NAME, if there is one
+        CALL    MKREN           ; RENFCB = NAME.$$$ (0-15), NAME (16-31)
+        LXI     D,RENFCB
+        MVI     C,FRENAM
+        CALL    BDOS
+        CPI     0FFH
+        JZ      ERENAM
+        XRA     A
+        STA     FMADE           ; nothing to clean up now
 
         CALL    SAYDONE
         JMP     0
@@ -369,7 +423,7 @@ RCLOSE: CALL    MKCLOSE
 ; then reset RECPOS and bump RECS. Does its own DE=FCB/BDOS call, so it
 ; must not be entered with anything live that needs to survive BDOS.
 ;-----------------------------------------------------------------------
-RFLUSH: LXI     D,FCB
+RFLUSH: LXI     D,TFCB
         MVI     C,FWRITE
         CALL    BDOS
         ORA     A
@@ -414,12 +468,8 @@ SAYPROG:MVI     E,CR
         MVI     C,PRSTR
         JMP     BDOS
 
-ABORT:  CALL    MKCLOSE
-        CALL    SENDPK
-        CALL    RECVPK
-        LXI     D,FCB
-        MVI     C,FCLOSE
-        CALL    BDOS
+ABORT:  CALL    NCLOSE
+        CALL    DROPT           ; erase NAME.$$$; NAME is untouched
         CALL    SAYABRT
         JMP     0
 
@@ -456,17 +506,148 @@ EFAIL:  CALL    MKPRNT
 DOSNF:  CALL    SAYNFND
         JMP     0
 
-ENODIR: CALL    MKCLOSE
-        CALL    SENDPK
-        CALL    RECVPK
+ENODIR: CALL    NCLOSE
         CALL    SAYNODIR
         JMP     0
 
-ECLOSE: CALL    SAYECLOS
+;---- v1.3: every failure after the OPEN closes the network unit and ----
+;---- erases NAME.$$$, so the old NAME survives.                      ----
+ECLOSE: CALL    DROPT
+        CALL    SAYECLOS
         JMP     0
 
-EWRITE: CALL    SAYEWRIT
+EWRITE: CALL    NCLOSE
+        CALL    DROPT
+        CALL    SAYEWRIT
         JMP     0
+
+ERENAM: CALL    SAYERENM        ; NAME.$$$ is complete: keep it, say so
+        JMP     0
+
+EREAD:  CALL    NCLOSE
+        CALL    DROPT
+        LXI     D,MRDNAK
+        MVI     C,PRSTR
+        CALL    BDOS
+        JMP     0
+
+;-----------------------------------------------------------------------
+; CHKST -- after a STATUS: return if it is an ACK whose error byte is
+; 01H (success) or 88H (end of file). Anything else ends the program
+; through ENERR. FujiNet puts an HTTP error in this byte (404 = 0AAH),
+; and a connection that failed (0CFH), so this is the only place the
+; program can see them.
+;-----------------------------------------------------------------------
+CHKST:  LDA     RXBUF+1
+        CPI     ACKCMD
+        MVI     A,0             ; no code: the STATUS itself was refused
+        JNZ     ENERR
+        LDA     RXBUF+9
+        CPI     NSOK
+        RZ
+        CPI     NSEOF
+        RZ
+                                ; fall into ENERR with A = the code
+ENERR:  STA     ERRCD
+        CALL    NCLOSE
+        CALL    DROPT
+        LXI     D,MFNERR        ; "WGET: FujiNet reported error "
+        MVI     C,PRSTR
+        CALL    BDOS
+        LDA     ERRCD
+        MOV     L,A
+        MVI     H,0
+        CALL    PRDEC
+        LXI     H,ERRTAB        ; a few codes get a meaning
+ENE1:   MOV     A,M
+        ORA     A
+        JZ      ENE3            ; not in the table
+        INX     H
+        MOV     B,A
+        LDA     ERRCD
+        CMP     B
+        JZ      ENE2
+        INX     H
+        INX     H
+        JMP     ENE1
+ENE2:   MOV     E,M
+        INX     H
+        MOV     D,M
+        MVI     C,PRSTR
+        CALL    BDOS
+ENE3:   LXI     D,MDOT
+        MVI     C,PRSTR
+        CALL    BDOS
+        JMP     0
+
+;-----------------------------------------------------------------------
+; NCLOSE -- CLOSE the network unit. The reply is not checked: this runs
+; on the way out, and there is nothing more to do if it fails.
+;-----------------------------------------------------------------------
+NCLOSE: CALL    MKCLOSE
+        CALL    SENDPK
+        JMP     RECVPK
+
+;-----------------------------------------------------------------------
+; DROPT -- if NAME.$$$ was made, close and erase it. Safe to call twice.
+;-----------------------------------------------------------------------
+DROPT:  LDA     FMADE
+        ORA     A
+        RZ
+        XRA     A
+        STA     FMADE
+        LXI     D,TFCB
+        MVI     C,FCLOSE
+        CALL    BDOS
+        LXI     D,TFCB
+        MVI     C,FDELET
+        JMP     BDOS
+
+;-----------------------------------------------------------------------
+; MKTMP -- TFCB = FCB with the type $$$ (the name NAME.$$$).
+; MKREN -- RENFCB = TFCB's drive and name (0-11), then FCB's (16-27),
+; all else zero: BDOS 23's layout.
+;-----------------------------------------------------------------------
+MKTMP:  LXI     H,FCB
+        LXI     D,TFCB
+        MVI     B,36
+MKT1:   MOV     A,M
+        STAX    D
+        INX     H
+        INX     D
+        DCR     B
+        JNZ     MKT1
+        MVI     A,'$'
+        STA     TFCB+9
+        STA     TFCB+10
+        STA     TFCB+11
+        RET
+
+MKREN:  LXI     H,RENFCB
+        MVI     B,36
+MKR1:   MVI     M,0
+        INX     H
+        DCR     B
+        JNZ     MKR1
+        LXI     H,TFCB
+        LXI     D,RENFCB
+        MVI     B,12
+MKR2:   MOV     A,M
+        STAX    D
+        INX     H
+        INX     D
+        DCR     B
+        JNZ     MKR2
+        LXI     H,FCB
+        LXI     D,RENFCB+16
+        MVI     B,12
+MKR3:   MOV     A,M
+        STAX    D
+        INX     H
+        INX     D
+        DCR     B
+        JNZ     MKR3
+        RET
 
 ;-----------------------------------------------------------------------
 ; CKEXIST -- if the destination CP/M file already exists, ask before
@@ -746,7 +927,12 @@ CK9:    MOV     A,D
 ; SENDING AND RECEIVING -- SLIP framing over the raw ACIA (verbatim from
 ; CPM Tools/NC.ASM)
 ;=======================================================================
-SENDPK: LDA     TXBUF+2
+SENDPK: IN      SIOST           ; v1.3: drop any stale byte first (a late
+        ANI     01H             ; reply would be read as the answer to
+        JZ      SPGO            ; this command -- manual 5.5)
+        IN      SIODT
+        JMP     SENDPK
+SPGO:   LDA     TXBUF+2
         MOV     C,A
         LDA     TXBUF+3
         MOV     B,A
@@ -782,10 +968,15 @@ SP9:    MVI     A,SLPEND
 ; RECVPK -- waits for the reply's leading SLPEND sync byte with a
 ; bounded busy-wait (TOOUTR outer passes x a full 16-bit inner
 ; countdown): if nothing at all comes back, print MNORE and quit rather
-; than hang forever. Once the sync byte is seen, the rest of the packet
-; is read with no further timeout -- a stall mid-packet, after real
-; framing has started, is a different (and much rarer) failure than
-; "no response at all," and out of scope here.
+; than hang forever.
+;
+; v1.3: the rest of the reply is read with ACINT, which gives up after
+; about 1.5 s with no byte (2 MHz), so a reply that stops part-way can
+; no longer hang the machine. RECVPK also stops at RXSIZE bytes (a lost
+; END byte used to run on into the variables), and checks what came:
+; at least the 6-byte header, a length field equal to the bytes
+; received, and the checksum (manual 4.3, 4.4). Any fault: MBADR and
+; out through FATAL. RXLEN = the reply's length.
 ;-----------------------------------------------------------------------
 RECVPK: MVI     A,TOOUTR
         STA     TOCNT
@@ -802,29 +993,94 @@ RPWAIT: IN      SIOST
         STA     TOCNT
         JNZ     RPSYNC
         CALL    SAYNORE         ; gave up -- no reply at all
-        JMP     0
+        JMP     FATAL
 
 RPGOTB: IN      SIODT
         CPI     SLPEND
         JNZ     RPSYNC          ; noise, not the sync byte -- keep waiting
         LXI     H,RXBUF
         LXI     B,0
-RP1:    CALL    ACIN
+RP1:    CALL    ACINT
+        JC      RPBAD           ; the reply stopped part-way
         CPI     SLPEND
         JZ      RP9
         CPI     SLPESC
         JNZ     RP3
-        CALL    ACIN
+        CALL    ACINT
+        JC      RPBAD
         CPI     SLPEEND
         JZ      RPQEND
+        CPI     SLPEESC
+        JNZ     RPBAD           ; ESC + anything else: a broken frame
         MVI     A,SLPESC
         JMP     RP3
 RPQEND: MVI     A,SLPEND
-RP3:    MOV     M,A
+RP3:    MOV     D,A             ; room left in RXBUF?
+        MOV     A,C
+        SUI     RXSIZE AND 0FFH
+        MOV     A,B
+        SBI     RXSIZE SHR 8
+        JNC     RPBAD           ; BC >= RXSIZE: too long
+        MOV     M,D
         INX     H
         INX     B
         JMP     RP1
-RP9:    RET
+
+RP9:    MOV     A,B             ; an END with nothing before it: that
+        ORA     C               ; was an opening END -- keep reading
+        JZ      RP1
+        MOV     H,B
+        MOV     L,C
+        SHLD    RXLEN
+        MOV     A,C             ; at least the 6-byte header?
+        SUI     6
+        MOV     A,B
+        SBI     0
+        JC      RPBAD
+        LDA     RXBUF+2         ; the length field = bytes received?
+        CMP     C
+        JNZ     RPBAD
+        LDA     RXBUF+3
+        CMP     B
+        JNZ     RPBAD
+        LDA     RXBUF+4         ; the checksum, taken with byte 4 = 0
+        STA     RXCK
+        XRA     A
+        STA     RXBUF+4
+        LXI     H,RXBUF
+        CALL    CKSUM           ; BC = RXLEN still
+        MOV     B,A
+        LDA     RXCK
+        STA     RXBUF+4
+        CMP     B
+        RZ
+RPBAD:  CALL    SAYBADR
+        JMP     FATAL
+
+;-----------------------------------------------------------------------
+; ACINT -- ACIN with a time limit: CY set if no byte came within a full
+; 16-bit countdown (about 1.5 s at 2 MHz). Keeps B, C, H, L.
+;-----------------------------------------------------------------------
+ACINT:  LXI     D,0
+AI1:    IN      SIOST
+        ANI     01H
+        JNZ     AI2
+        DCX     D
+        MOV     A,D
+        ORA     E
+        JNZ     AI1
+        STC
+        RET
+AI2:    IN      SIODT
+        ORA     A               ; CY=0
+        RET
+
+;-----------------------------------------------------------------------
+; FATAL -- the line to FujiNet failed. Erase NAME.$$$ and exit: there is
+; no point in sending FujiNet anything more.
+;-----------------------------------------------------------------------
+FATAL:  CALL    DROPT
+        JMP     0
 
 ACOUT:  PUSH    PSW
 AO1:    IN      SIOST
@@ -1046,6 +1302,15 @@ SAYSKIP:LXI     D,MSKIP
         MVI     C,PRSTR
         JMP     BDOS
 
+SAYBADR:LXI     D,MBADR
+        MVI     C,PRSTR
+        JMP     BDOS
+
+SAYERENM:
+        LXI     D,MERENM
+        MVI     C,PRSTR
+        JMP     BDOS
+
 ;-----------------------------------------------------------------------
 ; SAYDONE -- "NNN records received." -- PRDEC/DIV10 copied from
 ; CPM Tools/HDIR.ASM.
@@ -1111,7 +1376,47 @@ MNFND:  DB      CR,LF,'WGET: not found on that remote'
         DB      ' server.',CR,LF,'$'
 MBADP:  DB      CR,LF,'WGET: failed -- parent path does not'
         DB      ' exist.',CR,LF,'$'
-MABRT:  DB      CR,LF,'WGET: aborted.',CR,LF,'$'
+MABRT:  DB      CR,LF,'WGET: aborted. Nothing was saved.',CR,LF,'$'
+MBADR:  DB      CR,LF,'WGET: damaged or incomplete reply from'
+        DB      ' FujiNet.',CR,LF,'$'
+MRDNAK: DB      CR,LF,'WGET: FujiNet refused a READ. Nothing was'
+        DB      ' saved.',CR,LF,'$'
+MFNERR: DB      CR,LF,'WGET: FujiNet reported error $'
+MDOT:   DB      '. Nothing was saved.',CR,LF,'$'
+MERENM: DB      CR,LF,'WGET: could not rename the file. The data is'
+        DB      ' in the temporary file with the same name',CR,LF
+        DB      'and a type of three dollar signs.',CR,LF,'$'
+MEFNF:  DB      ' (not found)$'
+MEDEN:  DB      ' (access denied)$'
+MECONN: DB      ' (could not connect)$'
+METIME: DB      ' (timeout)$'
+MESRV:  DB      ' (server error)$'
+MECLI:  DB      ' (bad request)$'
+MEGEN:  DB      ' (general error)$'
+
+; ERRTAB -- STATUS error codes that ENERR names: code, then the message
+; address. Ends with 0. Codes from the RS-232 FujiNet User's Manual, 9.12.
+ERRTAB: DB      0AAH
+        DW      MEFNF
+        DB      0A7H
+        DW      MEDEN
+        DB      0C8H
+        DW      MECONN
+        DB      0C9H
+        DW      MECONN
+        DB      0CFH
+        DW      MECONN
+        DB      08AH
+        DW      METIME
+        DB      0CAH
+        DW      METIME
+        DB      0D7H
+        DW      MESRV
+        DB      0D6H
+        DW      MECLI
+        DB      090H
+        DW      MEGEN
+        DB      0
 MNODIR: DB      CR,LF,'WGET: can''t make file (directory full).',CR,LF,'$'
 MECLOS: DB      CR,LF,'WGET: error closing file.',CR,LF,'$'
 MEWRIT: DB      CR,LF,'WGET: error writing file.',CR,LF,'$'
@@ -1123,7 +1428,7 @@ MPROGP: DB      'Received $'
 MPROGS: DB      ' KB...$'
 MURL:   DB      'URL: $'
 
-MUSAGE: DB      CR,LF,'WGET v1.2 -- fetch a file through FujiNet''s'
+MUSAGE: DB      CR,LF,'WGET v1.3 -- fetch a file through FujiNet''s'
         DB      ' N: network device, prompting for the URL so its'
         DB      ' case survives the CCP.',CR,LF,CR,LF
         DB      '   WGET file.ext',CR,LF
@@ -1149,6 +1454,12 @@ PVALID:   DS    1
 TOCNT:  DS      1
 NAME:   DS      NAMLEN
 FCB:    DS      36              ; ours, not the CCP's at 5CH
+TFCB:   DS      36              ; v1.3: NAME.$$$, where the data goes
+RENFCB: DS      36              ; v1.3: BDOS 23's old+new name pair
+FMADE:  DS      1               ; v1.3: 1 while NAME.$$$ exists
+ERRCD:  DS      1               ; v1.3: the STATUS error code ENERR prints
+RXLEN:  DS      2               ; v1.3: the last reply's length
+RXCK:   DS      1               ; v1.3: its checksum byte, while checking
 BUF:    DS      RECLEN
 RECPOS: DS      1
 RECS:   DS      2
@@ -1167,8 +1478,8 @@ LBUF:   DB      SPECLEN-2       ; max chars BDOS 10 may store (its own header
         DB      0               ; actual count typed -- filled in by BDOS
         DS      SPECLEN-2       ; room for the typed characters
 
-TXBUF:  DS      200
-RXBUF:  DS      MAXREAD+20      ; header + up to MAXREAD bytes of payload
+TXBUF:  DS      SPECLEN+20      ; an OPEN: 8-byte header + SPEC
+RXBUF:  DS      RXSIZE          ; header + up to MAXREAD bytes of payload
 NUMEND: DS      1
 
         DS      64              ; stack

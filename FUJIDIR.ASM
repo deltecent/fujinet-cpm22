@@ -1,5 +1,5 @@
 ;-----------------------------------------------------------------------
-; FUJIDIR.COM v1.6 -- list a directory through FujiNet's N: network device.
+; FUJIDIR.COM v1.7 -- list a directory through FujiNet's N: network device.
 ;
 ;       FUJIDIR N:<url>         e.g.  FUJIDIR N1:TNFS://192.168.1.5/
 ;       FUJIDIR N:<url>/<pattern>     FUJIDIR N1:TNFS://192.168.1.5/*.COM
@@ -80,6 +80,13 @@
 ; /PUB/SCROLL??.TXT reached the server as pattern "SCROLL". So a '?' in
 ; the last segment is refused with a message (EQMARK), not sent.
 ;-----------------------------------------------------------------------
+; v1.7 (code review, 2026-10-13): every reply is now checked, as in
+; FUJIGET v1.7: RECVPK checks length and checksum, stops at the end of
+; RXBUF and times out between bytes; a NAK to READ stops the listing;
+; the copy uses the length the reply really carries; and a STATUS error
+; byte other than 01H/88H stops it with the code. LINEBUF can no longer
+; overflow: a line longer than it is cut. SPEC holds 250 characters.
+;-----------------------------------------------------------------------
 ; AND BDOS CLOBBERS EVERY REGISTER (A,B,C,D,E,H,L -- only SP survives).
 ;-----------------------------------------------------------------------
 ; Assemble it INSIDE the machine:
@@ -123,6 +130,8 @@ CMDCLOS EQU     43H
 CMDREAD EQU     52H
 CMDSTAT EQU     53H
 ACKCMD  EQU     06H
+NSOK    EQU     01H             ; STATUS error byte: success
+NSEOF   EQU     88H             ; STATUS error byte: end of file
 
 ACCDIR  EQU     06H             ; access mode: DIRECTORY, not read or write
 DIRFLONG EQU    80H             ; "translation" byte, repurposed as format:
@@ -136,7 +145,10 @@ SLPEEND EQU     0DCH
 SLPEESC EQU     0DDH
 
 RDMAX   EQU     128             ; largest READ this program ever asks for
-SPECLEN EQU     100             ; room for SPEC, including the NUL
+SPECLEN EQU     250             ; room for SPEC, including the NUL (must
+                                ; stay under 256: it is an 8-bit count)
+RXSIZE  EQU     200             ; RXBUF
+LBMAX   EQU     200             ; LINEBUF
 
 ;=======================================================================
 ; MAIN
@@ -189,6 +201,7 @@ DLOOP:  MVI     E,0FFH
 DPOLL:  CALL    MKSTAT
         CALL    SENDPK
         CALL    RECVPK
+        CALL    CHKST           ; v1.7: a NAK or an error byte: stop here
 
         LDA     RXBUF+6         ; bytes_waiting, lo
         MOV     D,A
@@ -221,13 +234,27 @@ DQMAX:  MVI     A,RDMAX
 DGO:    CALL    MKREAD
         CALL    SENDPK
         CALL    RECVPK
+        LDA     RXBUF+1         ; v1.7: a NAK carries no data
+        CPI     ACKCMD
+        JNZ     EREAD
+        LHLD    RXLEN           ; v1.7: print what really came: RXLEN-6,
+        LXI     D,0-6           ; which must be 1..REQLEN (REQLEN <= 128,
+        DAD     D               ; so only the low byte matters)
+        MOV     A,H
+        ORA     A
+        JNZ     EREAD
+        MOV     A,L
+        ORA     A
+        JZ      EREAD
+        MOV     B,A
+        LDA     REQLEN
+        CMP     B
+        JC      EREAD           ; more than we asked for
 
         MVI     A,1
         STA     ANYOUT
 
         LXI     H,RXBUF+6
-        LDA     REQLEN          ; REQLEN's hi byte is always 0 (RDMAX<256)
-        MOV     B,A
 DPRINT: MOV     A,B
         ORA     A
         JZ      DLOOP
@@ -305,6 +332,70 @@ EFAIL:  CALL    MKPRNT
 DOSNF:  CALL    SAYNFND
         JMP     0
 
+;---- v1.7: the error paths --------------------------------------------
+EREAD:  CALL    NCLOSE
+        LXI     D,MRDNAK
+        MVI     C,PRSTR
+        CALL    BDOS
+        JMP     0
+
+;-----------------------------------------------------------------------
+; CHKST -- after a STATUS: return if it is an ACK whose error byte is
+; 01H (success) or 88H (end of file). Anything else ends the program
+; through ENERR. FujiNet puts an HTTP error in this byte (404 = 0AAH),
+; and a connection that failed (0CFH), so this is the only place the
+; program can see them.
+;-----------------------------------------------------------------------
+CHKST:  LDA     RXBUF+1
+        CPI     ACKCMD
+        MVI     A,0             ; no code: the STATUS itself was refused
+        JNZ     ENERR
+        LDA     RXBUF+9
+        CPI     NSOK
+        RZ
+        CPI     NSEOF
+        RZ
+                                ; fall into ENERR with A = the code
+ENERR:  STA     ERRCD
+        CALL    NCLOSE
+        LXI     D,MFNERR        ; "FUJIDIR: FujiNet reported error "
+        MVI     C,PRSTR
+        CALL    BDOS
+        LDA     ERRCD
+        MOV     L,A
+        MVI     H,0
+        CALL    PRDEC
+        LXI     H,ERRTAB        ; a few codes get a meaning
+ENE1:   MOV     A,M
+        ORA     A
+        JZ      ENE3            ; not in the table
+        INX     H
+        MOV     B,A
+        LDA     ERRCD
+        CMP     B
+        JZ      ENE2
+        INX     H
+        INX     H
+        JMP     ENE1
+ENE2:   MOV     E,M
+        INX     H
+        MOV     D,M
+        MVI     C,PRSTR
+        CALL    BDOS
+ENE3:   LXI     D,MDOT
+        MVI     C,PRSTR
+        CALL    BDOS
+        JMP     0
+
+;-----------------------------------------------------------------------
+; NCLOSE -- CLOSE the network unit. The reply is not checked: this runs
+; on the way out, and there is nothing more to do if it fails.
+;-----------------------------------------------------------------------
+NCLOSE: CALL    MKCLOSE
+        CALL    SENDPK
+        JMP     RECVPK
+
+
 ;=======================================================================
 ; LINE BUFFERING -- LBYTE appends one byte to LINEBUF; on LF (end of a
 ; LONG-format entry) it calls LFLUSH to print the completed line and
@@ -315,8 +406,14 @@ DOSNF:  CALL    SAYNFND
 ; an ordinary file line: print it unchanged, size column and all.
 ;=======================================================================
 LBYTE:  MOV     C,A             ; save the incoming byte
-        LXI     H,LINEBUF
+        LDA     LINELEN         ; v1.7: room for it? The LF always fits:
+        CPI     LBMAX-1         ; other bytes stop one short of the end
+        JC      LB1
+        MOV     A,C
+        CPI     LF
+        RNZ                     ; a line longer than LINEBUF: cut it
         LDA     LINELEN
+LB1:    LXI     H,LINEBUF
         MOV     E,A
         MVI     D,0
         DAD     D               ; HL = LINEBUF + LINELEN
@@ -598,7 +695,12 @@ CK9:    MOV     A,D
 ;=======================================================================
 ; SENDING AND RECEIVING -- SLIP framing (verbatim from CPM Tools/NC.ASM)
 ;=======================================================================
-SENDPK: LDA     TXBUF+2
+SENDPK: IN      SIOST           ; v1.7: drop any stale byte first (a late
+        ANI     01H             ; reply would be read as the answer to
+        JZ      SPGO            ; this command -- manual 5.5)
+        IN      SIODT
+        JMP     SENDPK
+SPGO:   LDA     TXBUF+2
         MOV     C,A
         LDA     TXBUF+3
         MOV     B,A
@@ -634,10 +736,15 @@ SP9:    MVI     A,SLPEND
 ; RECVPK -- waits for the reply's leading SLPEND sync byte with a
 ; bounded busy-wait (TOOUTR outer passes x a full 16-bit inner
 ; countdown): if nothing at all comes back, print MNORE and quit rather
-; than hang forever. Once the sync byte is seen, the rest of the packet
-; is read with no further timeout -- a stall mid-packet, after real
-; framing has started, is a different (and much rarer) failure than
-; "no response at all," and out of scope here.
+; than hang forever.
+;
+; v1.7: the rest of the reply is read with ACINT, which gives up after
+; about 1.5 s with no byte (2 MHz), so a reply that stops part-way can
+; no longer hang the machine. RECVPK also stops at RXSIZE bytes (a lost
+; END byte used to run on into the variables), and checks what came:
+; at least the 6-byte header, a length field equal to the bytes
+; received, and the checksum (manual 4.3, 4.4). Any fault: MBADR and
+; out through FATAL. RXLEN = the reply's length.
 ;-----------------------------------------------------------------------
 RECVPK: MVI     A,TOOUTR
         STA     TOCNT
@@ -654,29 +761,93 @@ RPWAIT: IN      SIOST
         STA     TOCNT
         JNZ     RPSYNC
         CALL    SAYNORE         ; gave up -- no reply at all
-        JMP     0
+        JMP     FATAL
 
 RPGOTB: IN      SIODT
         CPI     SLPEND
         JNZ     RPSYNC          ; noise, not the sync byte -- keep waiting
         LXI     H,RXBUF
         LXI     B,0
-RP1:    CALL    ACIN
+RP1:    CALL    ACINT
+        JC      RPBAD           ; the reply stopped part-way
         CPI     SLPEND
         JZ      RP9
         CPI     SLPESC
         JNZ     RP3
-        CALL    ACIN
+        CALL    ACINT
+        JC      RPBAD
         CPI     SLPEEND
         JZ      RPQEND
+        CPI     SLPEESC
+        JNZ     RPBAD           ; ESC + anything else: a broken frame
         MVI     A,SLPESC
         JMP     RP3
 RPQEND: MVI     A,SLPEND
-RP3:    MOV     M,A
+RP3:    MOV     D,A             ; room left in RXBUF?
+        MOV     A,C
+        SUI     RXSIZE AND 0FFH
+        MOV     A,B
+        SBI     RXSIZE SHR 8
+        JNC     RPBAD           ; BC >= RXSIZE: too long
+        MOV     M,D
         INX     H
         INX     B
         JMP     RP1
-RP9:    RET
+
+RP9:    MOV     A,B             ; an END with nothing before it: that
+        ORA     C               ; was an opening END -- keep reading
+        JZ      RP1
+        MOV     H,B
+        MOV     L,C
+        SHLD    RXLEN
+        MOV     A,C             ; at least the 6-byte header?
+        SUI     6
+        MOV     A,B
+        SBI     0
+        JC      RPBAD
+        LDA     RXBUF+2         ; the length field = bytes received?
+        CMP     C
+        JNZ     RPBAD
+        LDA     RXBUF+3
+        CMP     B
+        JNZ     RPBAD
+        LDA     RXBUF+4         ; the checksum, taken with byte 4 = 0
+        STA     RXCK
+        XRA     A
+        STA     RXBUF+4
+        LXI     H,RXBUF
+        CALL    CKSUM           ; BC = RXLEN still
+        MOV     B,A
+        LDA     RXCK
+        STA     RXBUF+4
+        CMP     B
+        RZ
+RPBAD:  CALL    SAYBADR
+        JMP     FATAL
+
+;-----------------------------------------------------------------------
+; ACINT -- ACIN with a time limit: CY set if no byte came within a full
+; 16-bit countdown (about 1.5 s at 2 MHz). Keeps B, C, H, L.
+;-----------------------------------------------------------------------
+ACINT:  LXI     D,0
+AI1:    IN      SIOST
+        ANI     01H
+        JNZ     AI2
+        DCX     D
+        MOV     A,D
+        ORA     E
+        JNZ     AI1
+        STC
+        RET
+AI2:    IN      SIODT
+        ORA     A               ; CY=0
+        RET
+
+;-----------------------------------------------------------------------
+; FATAL -- the line to FujiNet failed. Exit: there is
+; no point in sending FujiNet anything more.
+;-----------------------------------------------------------------------
+FATAL:  JMP     0               ; FUJIDIR has no file to clean up
 
 ACOUT:  PUSH    PSW
 AO1:    IN      SIOST
@@ -769,6 +940,46 @@ SAYBAD: LXI     D,MBADP
         MVI     C,PRSTR
         JMP     BDOS
 
+; PRDEC/DIV10 -- print HL in decimal (v1.7, from FUJIGET.ASM).
+PRDEC:  LXI     D,NUMEND
+        MVI     A,'$'
+        STAX    D
+PD1:    DCX     D
+        CALL    DIV10
+        ADI     '0'
+        STAX    D
+        MOV     A,H
+        ORA     L
+        JNZ     PD1
+        MVI     C,PRSTR
+        JMP     BDOS
+
+DIV10:  PUSH    B
+        LXI     B,0
+DV1:    MOV     A,H
+        ORA     A
+        JNZ     DV2
+        MOV     A,L
+        CPI     10
+        JC      DV3
+DV2:    MOV     A,L
+        SUI     10
+        MOV     L,A
+        MOV     A,H
+        SBI     0
+        MOV     H,A
+        INX     B
+        JMP     DV1
+DV3:    MOV     A,L
+        MOV     H,B
+        MOV     L,C
+        POP     B
+        RET
+
+SAYBADR:LXI     D,MBADR
+        MVI     C,PRSTR
+        JMP     BDOS
+
 SAYABRT:LXI     D,MABRT
         MVI     C,PRSTR
         JMP     BDOS
@@ -799,11 +1010,47 @@ MNFND:  DB      CR,LF,'FUJIDIR: not found on that remote'
 MBADP:  DB      CR,LF,'FUJIDIR: failed -- parent path does not'
         DB      ' exist.',CR,LF,'$'
 MABRT:  DB      CR,LF,'FUJIDIR: aborted.',CR,LF,'$'
+MBADR:  DB      CR,LF,'FUJIDIR: damaged or incomplete reply from'
+        DB      ' FujiNet.',CR,LF,'$'
+MRDNAK: DB      CR,LF,'FUJIDIR: FujiNet refused a READ.',CR,LF,'$'
+MFNERR: DB      CR,LF,'FUJIDIR: FujiNet reported error $'
+MDOT:   DB      '.',CR,LF,'$'
+MEFNF:  DB      ' (not found)$'
+MEDEN:  DB      ' (access denied)$'
+MECONN: DB      ' (could not connect)$'
+METIME: DB      ' (timeout)$'
+MESRV:  DB      ' (server error)$'
+MECLI:  DB      ' (bad request)$'
+MEGEN:  DB      ' (general error)$'
+
+; ERRTAB -- STATUS error codes that ENERR names: code, then the message
+; address. Ends with 0. Codes from the RS-232 FujiNet User's Manual, 9.12.
+ERRTAB: DB      0AAH
+        DW      MEFNF
+        DB      0A7H
+        DW      MEDEN
+        DB      0C8H
+        DW      MECONN
+        DB      0C9H
+        DW      MECONN
+        DB      0CFH
+        DW      MECONN
+        DB      08AH
+        DW      METIME
+        DB      0CAH
+        DW      METIME
+        DB      0D7H
+        DW      MESRV
+        DB      0D6H
+        DW      MECLI
+        DB      090H
+        DW      MEGEN
+        DB      0
 MNONE:  DB      'FUJIDIR: nothing matches.',CR,LF,'$'
 MQMARK: DB      CR,LF,'FUJIDIR: FujiNet can''t send a ''?'' in a'
         DB      ' URL. Use ''*'' instead.',CR,LF,'$'
 
-MUSAGE: DB      CR,LF,'FUJIDIR v1.6 -- list a directory through FujiNet''s'
+MUSAGE: DB      CR,LF,'FUJIDIR v1.7 -- list a directory through FujiNet''s'
         DB      ' N: network device.',CR,LF,CR,LF
         DB      '   FUJIDIR N:<url>',CR,LF,CR,LF
         DB      'Examples',CR,LF
@@ -824,12 +1071,16 @@ TOCNT:  DS      1
 REQLEN: DS      2
 ANYOUT: DS      1
 LINELEN:DS      1
+ERRCD:  DS      1               ; v1.7: the STATUS error code ENERR prints
+RXLEN:  DS      2               ; v1.7: the last reply's length
+RXCK:   DS      1               ; v1.7: its checksum byte, while checking
 LFTOT:  DS      1
 
-TXBUF:  DS      200
-RXBUF:  DS      200
-LINEBUF:DS      200             ; one LONG-format entry (well under 40
-                                ; bytes) never comes close to filling this
+TXBUF:  DS      SPECLEN+20      ; an OPEN: 8-byte header + PROBESPC
+RXBUF:  DS      RXSIZE
+NUMEND: DS      1
+LINEBUF:DS      LBMAX           ; one LONG-format entry. A long name can
+                                ; pass 200 bytes: LBYTE cuts it to fit
 
         DS      64              ; stack
 STACK   EQU     $

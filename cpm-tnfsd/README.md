@@ -8,7 +8,7 @@ and `FUJIPUT`. That gives you CP/M-to-CP/M file transfer over a LAN.
 TNFSD                           serve the current drive, current user area
 ```
 
-Current version: `TNFSD` v0.4.
+Current version: `TNFSD` v0.5.
 
 ## Read the limits first
 
@@ -26,9 +26,16 @@ Current version: `TNFSD` v0.4.
   TNFS client tries TCP first, so `FUJIGET`, `FUJIPUT` and `FUJIDIR` work.
 - **One client at a time.** TNFSD serves one TCP connection at a time. It was not
   tested with two clients at once.
-- **Uploads replace existing files.** CP/M 2.2 has no call to shorten a file. So
-  an upload to an existing name deletes the old file and makes a new one.
-  `FUJIPUT` asks `Replace? (Y/N)` first. Other clients may not ask.
+- **Uploads replace existing files.** An upload to an existing name replaces the
+  old file. `FUJIPUT` asks `Replace? (Y/N)` first. Other clients may not ask.
+  TNFSD writes an upload to a temporary file (the name with the type `$$$`). It
+  replaces the old file only when the client closes the upload. If the client
+  disconnects first, or you press Ctrl-C on the server, TNFSD erases the
+  temporary file and keeps the old one: the console then shows `upload not
+  finished, the old file is kept`. **A Ctrl-C on the client is different:**
+  FUJIPUT then closes the file normally, and TNFS has no way to say "abort". So
+  TNFSD keeps the part that arrived, and FUJIPUT says `The remote file is
+  incomplete`.
 - **No delete, rename or new folders.** TNFSD answers these requests with "not
   implemented".
 - **CP/M file sizes.** Every size is a multiple of 128 bytes (one CP/M record).
@@ -38,6 +45,10 @@ Current version: `TNFSD` v0.4.
   refuses an upload with a name that CP/M cannot use.
 - **Directory listings.** TNFSD lists at most 255 files. A listing shows at most
   512 KB for a larger file. A file transfer uses the real size.
+- **If FujiNet stops answering** (power off, reset, a cable pulled), TNFSD
+  waits about 20 s (at 2 MHz), then shows `TNFSD: FujiNet stopped answering.
+  Closed.` and exits to CP/M. Versions before v0.5 waited for ever, and Ctrl-C
+  could not stop them.
 - **Changed disks.** TNFSD reads the directory when it starts. If you change the
   disk while it runs, stop TNFSD and start it again.
 - **FujiNet-PC.** On FujiNet-PC, TNFSD shows the wrong address, and only one
@@ -57,7 +68,7 @@ Current version: `TNFSD` v0.4.
 TNFSD shows what it does on the console:
 
 ```
-TNFSD v0.4: serving drive A: (user 0) on TCP port 16384.
+TNFSD v0.5: serving drive A: (user 0) on TCP port 16384.
 Connect to N1:TNFS://192.168.1.30/
 40 files cached. Ctrl-C quits.
 Client connected.
@@ -125,7 +136,7 @@ ASM TNFSD                       -> TNFSD.HEX
 LOAD TNFSD                      -> TNFSD.COM
 ```
 
-`TNFSD.COM` is 4736 bytes.
+`TNFSD.COM` is 5248 bytes.
 
 ## How it works
 
@@ -144,6 +155,14 @@ LOAD TNFSD                      -> TNFSD.COM
   the drive. So a directory listing needs no disk access.
 - TNFSD answers a retried request with the same reply again. FujiNet's TNFS
   client retries after 2 seconds with no answer.
+- FujiNet's TCP server reports "connected" both while the client is there and,
+  after it has gone, when a new client is already waiting. So when nothing has
+  arrived for a few polls, TNFSD sends `NET_CONTROL` (accept). A NAK means the
+  client is still there. An ACK means a new client has taken over: TNFSD ends
+  the old session and starts the new one. Before v0.5, a client that connected
+  again at once could leave TNFSD waiting for ever on the old connection.
+- Every reply from FujiNet is checked: its length, its checksum, a time limit
+  between bytes, and the most bytes it can hold.
 
 Why not UDP, the usual TNFS transport? On the RS232 `N:` device, UDP does not keep
 datagram boundaries. Live tests in September 2026 showed this on a real adapter.
@@ -173,3 +192,15 @@ TCP works, and FujiNet's TNFS client tries it first.
 
 A scripted TNFS client on a Mac also tested each command on its own, and the
 error replies.
+
+**v0.5 (2026-10-13)**, on `altairsim` with FujiNet-PC and on the real 8800c
+(FujiNet RS232 adapter, upstream firmware `3d9722fc1`, 76800 baud):
+
+| Test | Result |
+|---|---|
+| The scripted TNFS client, every command and error reply | all pass (both) |
+| Six client connections, each one at once after the last | all served (both). v0.4 stopped after the first. |
+| `FUJIGET` of a 5248-byte file from TNFSD | byte-identical (both) |
+| `FUJIPUT` of a 92288-byte file to TNFSD, then read back | byte-identical (both) |
+| A client disconnects during an upload over an existing file | the old file is kept, no `$$$` file left |
+| FujiNet-PC stopped while TNFSD runs | `FujiNet stopped answering. Closed.` after 17 s |

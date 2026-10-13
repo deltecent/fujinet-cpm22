@@ -48,11 +48,11 @@ The team confirmed this live against a real HTTPS server, deramp.com. They typed
 This command arrived at FujiNet as
 `N1:HTTPS://DERAMP.COM/DOWNLOADS/.../MEMTEST.ASM`, all uppercase, because that is
 what the CCP handed to the program. That path does not exist on deramp.com's
-case-sensitive server, so the request failed with an HTTP 404 error. FujiNet's HTTP
-backend does not check the HTTP status code before it returns the response body.
-So `FUJIGET` reported a normal "10 records received" for what was really a
-1237-byte 404 error page, not the real 3721-byte file. The result: no error
-message, just silently wrong data.
+case-sensitive server, so the request failed with an HTTP 404 error. The FUJIGET of
+that time (v1.6 and older) did not read FujiNet's error code. So it reported a normal
+"10 records received" for what was really a 1237-byte 404 error page, not the real
+3721-byte file. The result: no error message, just silently wrong data. FUJIGET v1.7
+and WGET v1.3 read the code and stop with `error 170 (not found)` (see below).
 
 `WGET` uses BDOS function 10, Read Console Buffer, to read the URL. This is a raw
 line-editing read with no case conversion of its own. It is not the CCP's parser,
@@ -62,12 +62,12 @@ survives intact. The team confirmed this live: they typed the same deramp.com pa
 at `WGET`'s prompt, in its real mixed-case form, and it fetched the real file. They
 verified the file was byte-identical to a direct download.
 
-**Known caveat, inherited from FUJIGET, not fixed by this tool:** `WGET` fixes the
-*case-folding* problem. But FujiNet's HTTP backend still does not check the HTTP
-status code on a plain GET. A `404`, `403`, or any other non-2xx response still
-streams back and saves as if it were the real file, with no error reported. Check
-what actually arrived: check the size, or run a quick `TYPE`. Do not trust "records
-received" alone, especially against a URL you have not fetched before.
+**HTTP errors (v1.3).** FujiNet puts the HTTP result in its error code, and WGET
+checks that code. A `404` stops WGET with `WGET: FujiNet reported error 170 (not
+found). Nothing was saved.`; a `401` or `403` gives error 212; a `5xx` gives error 215
+(server error). WGET writes to a temporary `.$$$` file and replaces the old file only
+after a clean end, so a failed fetch leaves an existing file as it was. Older WGET
+versions (v1.2 and before) did not check the code and saved the error page as the file.
 
 ## Getting the URL: copy it from a browser, don't retype it
 
@@ -97,8 +97,9 @@ assembles with CP/M's own `ASM`/`LOAD`; no cross-assembler is needed.
 ## Status
 
 The team built and verified `WGET` against the emulated `fujinet-pc-RS232` build
-on macOS, for HTTP and HTTPS only. Real hardware, and other schemes (TNFS, TCP),
-inherit `FUJIGET`'s own existing testing. But the team has not separately
-re-verified them through `WGET`'s prompt path. `WGET` is not part of the packaged
+on macOS, for HTTP and HTTPS. v1.3 was also tested on a real Altair 8800c with a
+real FujiNet RS232 adapter (2026-10-13): a mixed-case HTTP path, byte-exact. Other
+schemes (TNFS, TCP) inherit `FUJIGET`'s own testing, but were not re-verified
+through `WGET`'s prompt path. `WGET` is not part of the packaged
 release zip. Like `altairsim/`, `tnfsd-server-setup/`, and `fujinet-rs232/`, it is
 repo-only: get it straight from here.

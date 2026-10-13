@@ -23,7 +23,7 @@ FUJIDIR N:<url>[pattern]        list a directory,  e.g. FUJIDIR N1:TNFS://192.16
 
 Each tool has its own version number. Each tool changes on its own schedule, not together.
 Each tool prints its own version when you run it with no arguments. Current versions:
-`FUJIGET` v1.6, `FUJIPUT` v1.4, `FUJIDIR` v1.6.
+`FUJIGET` v1.7, `FUJIPUT` v1.5, `FUJIDIR` v1.7.
 
 FujiNet's protocol supports a delete/remove counterpart (`RMDIR`, file `DELETE`). This
 project deliberately does not include one. See "Known limitations" below.
@@ -313,6 +313,33 @@ reports `not found on that remote server` (the URL's parent path exists, but the
 not; by far the most common cause) or `failed -- parent path does not exist` (not even the
 containing directory is there).
 
+#### When a transfer fails (v1.7)
+
+FUJIGET writes the data to a temporary file first: the same name with the type `$$$`, for
+example `HELLO.$$$`. Only after a clean end of file does it erase the old `HELLO.TXT` and rename
+`HELLO.$$$` to it. If anything fails, or you press Ctrl-C, FUJIGET erases the temporary file. Your
+old file stays as it was. The message ends with `Nothing was saved.`
+
+After the open, FujiNet reports problems in an error code. FUJIGET checks that code each time it
+asks FujiNet for the transfer's status, and stops with the code and its meaning, for example:
+
+```
+FUJIGET: FujiNet reported error 170 (not found). Nothing was saved.
+```
+
+Some codes you can see (the full list is in the RS-232 FujiNet User's Manual, 9.12):
+
+| Code | Meaning | Typical cause |
+|---|---|---|
+| 170 | not found | An HTTP 404: the URL's file is not on the web server. |
+| 212 | invalid user name or password | An HTTP 401 or 403. FUJIGET prints the number only. |
+| 207 | could not connect | Nothing listens at the host and port in the URL. |
+| 144 | general error | The server refused a write (FUJIPUT): full disk, size limit. |
+| 215 | server error | An HTTP 5xx. |
+
+Before v1.7, FUJIGET saved an HTTP error page as if it were the file, and a server that was not
+there gave `0 records received.` after the old local file was already erased.
+
 For a CP/M version of the Linux `wget` command, one that prompts for the URL instead of
 taking it on the command line so its case survives a case-sensitive remote like a real HTTP
 server, see [`wget/`](https://github.com/trgeuy/fujinet-cpm22/tree/main/wget).
@@ -332,7 +359,8 @@ remote server is a bad day for everyone else who uses it. So if the probe finds 
 FUJIPUT asks `<url> exists on the remote. Replace? (Y/N)` before it opens for write at all.
 This only means something for a target where "exists" is meaningful (TNFS, SD, HTTP). A raw
 `TCP://` stream has no file to find, so the probe just comes back "not there" and nothing is
-asked.
+asked. Over HTTP an open always succeeds, so since v1.5 the probe also asks FujiNet for the
+status: error 170 (not found) means "not there".
 
 CP/M stores files as whole 128-byte records with no exact byte count, so the last record of a
 short file is padded with `^Z` (`1AH`). The optional third argument controls what happens to
@@ -346,6 +374,18 @@ that padding on the way out:
 
 As of v1.4, FUJIPUT prints `Sent NNNN KB...` in place the same way FUJIGET does (see above),
 once every 1KB sent.
+
+Since v1.5, FUJIPUT checks FujiNet's answer to every block it sends. If the server refuses the
+data (a full disk, a size limit, a dropped connection), FUJIPUT stops and says so:
+
+```
+FUJIPUT: the server refused the data (FujiNet error 144 (general error)).
+The remote file is incomplete.
+```
+
+Before v1.5, FUJIPUT printed `NNN records sent.` even when the server had kept only part of the
+file. A file on the server cannot be put back the way it was: send it again when the cause is
+fixed.
 
 If the write-mode open fails (after the overwrite check above has already been answered, or
 found nothing to ask about), FUJIPUT diagnoses it the same best-effort way (see "Where the
@@ -406,8 +446,13 @@ normal ACK/NAK reply. The wait is a busy-wait loop, not a real timer (CP/M 2.2 h
 general-purpose one, and none of these programs use a BDOS timer call). So how long it
 actually takes depends on your hardware's clock speed, roughly 15-20 real seconds on a stock
 2MHz Altair. Each `.ASM`'s `TOOUTR` constant, right next to the port equates, controls it;
-raise or lower it if the default feels wrong for your setup. A reply that starts arriving is
-trusted to finish; only complete silence triggers this.
+raise or lower it if the default feels wrong for your setup.
+
+Since FUJIGET v1.7, FUJIPUT v1.5 and FUJIDIR v1.7 (and WGET v1.3), the tools also check each reply
+that does arrive. A reply that stops part-way (no byte for about 1.5 s at 2 MHz), is too long, or
+fails its length or checksum check gives `<TOOL>: damaged or incomplete reply from FujiNet.` These
+checks cost about 7% of the transfer speed on a 2 MHz 8800c (92 KB: 46.6 s, against 43.4 s
+before).
 
 ### A worked example, start to finish
 
@@ -472,11 +517,11 @@ paths unreachable.
 
 ## Known limitations
 
-- **Failure messages ("not found," "denied," "parent path does not exist") are inferred, not
-  server-reported.** FujiNet's NAK carries no error detail at all for any of these commands
-  (confirmed from `fujinet-firmware` source). So each tool probes the parent directory after a
-  failure and guesses from that: a strong heuristic, not a guarantee. See
-  `docs/rs232-protocol.md` for the full reasoning.
+- **A failed open is diagnosed by inference.** When the open itself fails, the messages "not
+  found," "denied" and "parent path does not exist" are inferred, not server-reported: FujiNet's
+  NAK carries no error detail, so each tool probes the parent directory and guesses from that.
+  A strong heuristic, not a guarantee. See `docs/rs232-protocol.md`. Failures *after* the open
+  come from FujiNet's own error code (see "When a transfer fails" above).
 - **No delete/remove tools (`RMDIR`, file `DELETE`).** FujiNet's protocol supports both (see
   `docs/rs232-protocol.md`), but they are not implemented here. This is a deliberate choice,
   not a gap, to avoid shipping easy ways to destroy data on a remote server you may not

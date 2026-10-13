@@ -16,11 +16,11 @@ each `.ASM` file has its own copy of the port settings. Change every file that y
 
 | File | Port equates | UART init block | Status polls |
 |---|---|---|---|
-| `FUJIGET.ASM` | yes | yes | `RPWAIT`, `AO1`, `ACIN` |
-| `FUJIPUT.ASM` | yes | yes | `RPWAIT`, `AO1`, `ACIN` |
-| `FUJIDIR.ASM` | yes | yes | `RPWAIT`, `AO1`, `ACIN` |
-| `wget/WGET.ASM` | yes | yes | `RPWAIT`, `AO1`, `ACIN` |
-| `cpm-tnfsd/TNFSD.ASM` | yes | yes | `AO1`, `ACIN` |
+| `FUJIGET.ASM` | yes | yes | `SENDPK`, `RPWAIT`, `AI1`, `AO1`, `ACIN` |
+| `FUJIPUT.ASM` | yes | yes | `SENDPK`, `RPWAIT`, `AI1`, `AO1`, `ACIN` |
+| `FUJIDIR.ASM` | yes | yes | `SENDPK`, `RPWAIT`, `AI1`, `AO1`, `ACIN` |
+| `wget/WGET.ASM` | yes | yes | `SENDPK`, `RPWAIT`, `AI1`, `AO1`, `ACIN` |
+| `cpm-tnfsd/TNFSD.ASM` | yes | yes | `SENDPK`, `RPWAIT`, `AI1`, `AO1`, `ACIN` |
 | `testing/NC.ASM` | yes | yes | `AO1`, `ACIN` |
 
 ## Before you start: facts about your serial board
@@ -78,8 +78,16 @@ ACIN:   IN      SIOST           ; wait for data-ready before IN SIODT
         JZ      ACIN
 ```
 
-`RPWAIT` is a third copy of the data-ready wait, with a timeout. `TNFSD.ASM` and `NC.ASM` do not
-have `RPWAIT`. See the table above for which routines each file has.
+The other sites test the same data-ready bit:
+
+- `RPWAIT`: waits for the first byte of a reply, with a long timeout.
+- `AI1` (in `ACINT`): waits for each next byte of a reply, with a short timeout.
+- `SENDPK`: before it sends a packet, reads and drops any byte already waiting.
+
+These three came with FUJIGET v1.7, FUJIPUT v1.5, FUJIDIR v1.7, WGET v1.3 and TNFSD v0.5
+(2026-10-13; `RPWAIT` was in the client tools before). `ACIN` is no longer called in these
+files, but it is still there: change it too. `NC.ASM` has only `AO1` and `ACIN`. See the table
+above for which routines each file has.
 
 `ANI 01H` tests bit 0: the 6850's RDRF flag (receive data register full). `ANI 02H` tests bit 1:
 the 6850's TDRE flag (transmit data register empty). These bit positions belong to the 6850
@@ -91,7 +99,9 @@ program then polls the wrong bit: it waits forever, or it reads a byte that is n
 
 **Check the polarity too.** The 6850 is active-high: a set bit means "ready", so the code jumps
 back with `JZ`. Some UARTs are active-low. For example, the COM2502 on the MITS 88-SIO shows
-"ready" with a **clear** bit. On a chip like that, change `JZ` to `JNZ` at every site as well.
+"ready" with a **clear** bit. On a chip like that, swap the jump after the mask at every site
+as well: `JZ` becomes `JNZ`, and `JNZ` becomes `JZ`. (`AO1` and `ACIN` jump back with `JZ`;
+`RPWAIT` and `AI1` jump out with `JNZ`; `SENDPK` jumps on with `JZ`.)
 
 ## 3. The UART initialization
 
