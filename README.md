@@ -110,17 +110,30 @@ with an asset named `fujinet-pc-RS232_<version>_<platform>.<ext>` (or, on older/
 just `fujinet-RS232-<build>.zip`). Pick the asset matching your OS and CPU:
 `macos-14-arm64`/`macos-15-arm64` for Apple Silicon, `macos-15-x64` for Intel Macs,
 `ubuntu-22.04-amd64`/`ubuntu-24.04-amd64` for Linux, `windows-x64` for Windows. This project
-was built and tested against a nightly build reporting itself as `FujiNet v1.6-947873d94
-(RS232)`. If something does not match this guide, that version is the reference point.
+was tested against a nightly build that reports itself as `FujiNet v1.6-8f7231a78 2026-10-12
+23:27:33 (RS232)`. If something does not match this guide, that version is the reference point.
+
+**Check the date of your file.** The nightly release is one page, but each platform file on it
+is built at a different time. On 2026-10-13, the `macos-15-arm64` file was from 2026-10-13, the
+`macos-14-arm64` file was from 2026-10-03, and the `macos-15-x64` file was from 2026-09-21.
+When FujiNet-PC starts, it prints its version and build date in a line that starts with
+`FujiNet v`. Do not use a build dated 2026-10-02 to 2026-10-06. Those builds can cut off a
+`FUJIDIR` listing that is longer than 512 bytes.
 
 **Install** (macOS):
 
 ```
+brew install openssl@4                                  # FujiNet-PC needs Homebrew's OpenSSL
 tar xzf fujinet-pc-RS232_*.tar.gz -C fujinet-rs232/     # or wherever you want it to live
 cd fujinet-rs232
 xattr -d com.apple.quarantine ./fujinet                 # macOS will otherwise refuse to run it
 chmod +x ./fujinet
 ```
+
+The macOS build of FujiNet-PC loads the OpenSSL library from [Homebrew](https://brew.sh). If
+the library is missing, FujiNet-PC stops at once with `Library not loaded:
+/opt/homebrew/opt/openssl@4/lib/libcrypto.4.dylib`. Install the OpenSSL version that this
+error names. Older builds, such as `947873d94`, use `openssl@3`.
 
 Keep the extracted `fujinet` binary together with the `fnconfig.ini`, `data/`, and `SD/` that
 come with the archive (or that get created on first run). The program uses paths relative to
