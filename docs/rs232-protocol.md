@@ -175,6 +175,13 @@ local echo server over a real internet host to keep the test self-contained:
   refused a write). An HTTP OPEN always ACKs (HTTP connects at the first STATUS), so for HTTP
   this byte is the only place a failure shows. The tools stop on any other value (FUJIGET
   v1.7, FUJIPUT v1.5, FUJIDIR v1.7, WGET v1.3).
+- **STATUS after a failed OPEN.** The OPEN's NAK has no reason in it. FujiNet firmware from
+  2026-09-27 on (fujinet-firmware #1706) keeps the reason, and a STATUS sent after the NAK
+  reports it in the same error byte: `0A7H` = access denied, `0AAH` = not found. Older firmware
+  answers `0CFH` (not connected) there, so that value says nothing about the OPEN. FUJIGET v1.8
+  and FUJIPUT v1.6 ask STATUS first, and use the parent-directory probe below only when the
+  answer is not `0A7H`/`0AAH` (FUJIGET probes on `0AAH` too: for a read, the probe tells a
+  missing file from a missing directory).
 - **`NETCMD_CLOSE`** takes zero params. It returns **ACK**.
 
 This closes the two gaps below for the network-device path. **`FUJICMD_MOUNT_HOST`/

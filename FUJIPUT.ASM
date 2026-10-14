@@ -1,5 +1,5 @@
 ;-----------------------------------------------------------------------
-; FUJIPUT.COM v1.5 -- send a file through FujiNet's N: network device.
+; FUJIPUT.COM v1.6 -- send a file through FujiNet's N: network device.
 ;
 ;       FUJIPUT file.ext N:<url> [B|T]     e.g.  FUJIPUT HELLO.TXT N1:TNFS://192.168.1.5/HELLO.TXT T
 ;
@@ -71,6 +71,15 @@
 ; - The "does it exist?" probe also asks STATUS: over HTTP an OPEN always
 ;   ACKs, and only the STATUS error byte (0AAH = not found) tells.
 ; - SPEC holds 250 characters: the CCP's longest command tail fits.
+;
+;-----------------------------------------------------------------------
+; v1.6 (2026-10-14): a refused OPEN now asks FujiNet WHY before it guesses.
+; FujiNet firmware from 2026-09-27 on (#1706) keeps the reason for a failed
+; OPEN, and STATUS reports it: 0A7H = access denied, 0AAH = not found.
+; Before, FUJIPUT only probed the parent directory, and a drop box (a
+; write-only incoming/ folder: refuses a taken name, refuses every listing)
+; always came out as "parent path does not exist". Any other STATUS answer
+; (older firmware says 0CFH, not connected) falls back to the parent probe.
 ;
 ; AND BDOS CLOBBERS EVERY REGISTER (A,B,C,D,E,H,L -- only SP survives).
 ;-----------------------------------------------------------------------
@@ -373,7 +382,18 @@ ABORT:  CALL    MKCLOSE
 ; permission/read-only; if the parent doesn't exist either, the path
 ; itself is bad. See this file's header for why it's only a guess.
 ;-----------------------------------------------------------------------
-EFAIL:  CALL    MKPRNT
+EFAIL:  CALL    MKSTAT          ; v1.6: ask FujiNet why first
+        CALL    SENDPK
+        CALL    RECVPK
+        LDA     RXBUF+1
+        CPI     ACKCMD
+        JNZ     EFPROB          ; no reason given -- guess, as before
+        LDA     RXBUF+9
+        CPI     0A7H            ; access denied (a drop box's taken name)
+        JZ      DOSDEN
+        CPI     0AAH            ; not found: on a write, the path is bad
+        JZ      EFBAD
+EFPROB: CALL    MKPRNT          ; older firmware: guess from the parent
         LDA     PVALID
         ORA     A
         JZ      DOSDEN          ; couldn't even determine a parent -- default
@@ -393,7 +413,7 @@ EFAIL:  CALL    MKPRNT
 
         CPI     ACKCMD
         JZ      DOSDEN          ; parent exists -- so it's permission/server-side
-        CALL    SAYBAD
+EFBAD:  CALL    SAYBAD
         JMP     0
 
 DOSDEN: CALL    SAYDEN
@@ -1150,7 +1170,7 @@ MEBADSW:DB      CR,LF,'FUJIPUT: the switch is B (every byte, the default) or'
 MPROGP: DB      'Sent $'
 MPROGS: DB      ' KB...$'
 
-MUSAGE: DB      CR,LF,'FUJIPUT v1.5 -- send a file through FujiNet''s'
+MUSAGE: DB      CR,LF,'FUJIPUT v1.6 -- send a file through FujiNet''s'
         DB      ' N: network device.',CR,LF,CR,LF
         DB      '   FUJIPUT file.ext N:<url> [B|T]',CR,LF,CR,LF
         DB      'Example',CR,LF

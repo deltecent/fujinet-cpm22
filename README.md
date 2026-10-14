@@ -23,7 +23,7 @@ FUJIDIR N:<url>[pattern]        list a directory,  e.g. FUJIDIR N1:TNFS://192.16
 
 Each tool has its own version number. Each tool changes on its own schedule, not together.
 Each tool prints its own version when you run it with no arguments. Current versions:
-`FUJIGET` v1.7, `FUJIPUT` v1.5, `FUJIDIR` v1.7.
+`FUJIGET` v1.8, `FUJIPUT` v1.6, `FUJIDIR` v1.7.
 
 FujiNet's protocol supports a delete/remove counterpart (`RMDIR`, file `DELETE`). This
 project deliberately does not include one. See "Known limitations" below.
@@ -312,12 +312,15 @@ As of v1.4, FUJIGET prints `Received NNNN KB...` in place (overwriting itself, n
 once every 1KB received. So a transfer that takes a while shows a visible sign of life
 without filling the screen the way a dot per packet would.
 
-If the network open fails, FUJIGET now tells you *which kind* of failure it probably was.
-(FujiNet's reply itself carries no error detail, so this is a best-effort diagnosis, not
-something the server actually reported; see "Where the protocol details live" below.) It
-reports `not found on that remote server` (the URL's parent path exists, but the target does
-not; by far the most common cause) or `failed -- parent path does not exist` (not even the
-containing directory is there).
+If the network open fails, FUJIGET tells you *which kind* of failure it was. Since v1.8 it
+first asks FujiNet for the reason. FujiNet firmware from 2026-09-27 on keeps the reason for a
+failed open. If the server refused access, FUJIGET reports `denied (permission or server
+restriction)`, for example for a read from a server's write-only `incoming/` drop box. In
+all other cases, and with older firmware, it makes a best-effort diagnosis from the parent
+directory (see "Where the protocol details live" below). It reports `not found on that
+remote server` (the URL's parent path exists, but the target does not; by far the most
+common cause) or `failed -- parent path does not exist` (not even the containing directory
+is there).
 
 #### When a transfer fails (v1.7)
 
@@ -394,7 +397,10 @@ file. A file on the server cannot be put back the way it was: send it again when
 fixed.
 
 If the write-mode open fails (after the overwrite check above has already been answered, or
-found nothing to ask about), FUJIPUT diagnoses it the same best-effort way (see "Where the
+found nothing to ask about), FUJIPUT also asks FujiNet for the reason first (since v1.6).
+Access denied gives `denied (permission or server restriction)`, for example a name that is
+already taken in a drop box. Not found gives `failed -- parent path does not exist`. With
+older firmware, FUJIPUT makes the same best-effort diagnosis as FUJIGET (see "Where the
 protocol details live" below). It reports `denied (permission or server restriction)` if the
 parent path checks out, since creating or writing was expected to just work, or
 `failed -- parent path does not exist` if the parent is not there either.
@@ -523,11 +529,12 @@ paths unreachable.
 
 ## Known limitations
 
-- **A failed open is diagnosed by inference.** When the open itself fails, the messages "not
-  found," "denied" and "parent path does not exist" are inferred, not server-reported: FujiNet's
-  NAK carries no error detail, so each tool probes the parent directory and guesses from that.
-  A strong heuristic, not a guarantee. See `docs/rs232-protocol.md`. Failures *after* the open
-  come from FujiNet's own error code (see "When a transfer fails" above).
+- **A failed open is partly diagnosed by inference.** FUJIGET (v1.8) and FUJIPUT (v1.6) first
+  ask FujiNet for the reason, which firmware from 2026-09-27 on keeps. Otherwise, and in
+  FUJIDIR, the messages "not found," "denied" and "parent path does not exist" are inferred,
+  not server-reported: each tool probes the parent directory and guesses from that. A strong
+  heuristic, not a guarantee. See `docs/rs232-protocol.md`. Failures *after* the open come
+  from FujiNet's own error code (see "When a transfer fails" above).
 - **No delete/remove tools (`RMDIR`, file `DELETE`).** FujiNet's protocol supports both (see
   `docs/rs232-protocol.md`), but they are not implemented here. This is a deliberate choice,
   not a gap, to avoid shipping easy ways to destroy data on a remote server you may not

@@ -62,6 +62,12 @@ exact name is known. This is stricter than the old stock-`tnfsd` layout.
 There, a `0333` directory blocked listing but still let a client fetch a file
 by an exact known name. de-tnfsd has no equivalent gap.
 
+**Since FUJIGET v1.8 and FUJIPUT v1.6** (with FujiNet firmware from 2026-09-27
+or later), a refusal in `INCOMING/` prints `denied (permission or server
+restriction)`: a read, and an upload to a name that is already taken. The tools
+now ask FujiNet for the reason. The rest of this section is about older
+versions.
+
 The old guide documented `FUJIGET` failing against `INCOMING/` with `"failed
 -- parent path does not exist"`, rather than "denied". This was a quirk of
 `FUJIGET`'s own parent-directory reachability probe, under stock `tnfsd`'s

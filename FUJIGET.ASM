@@ -1,5 +1,5 @@
 ;-----------------------------------------------------------------------
-; FUJIGET.COM v1.7 -- fetch a file through FujiNet's N: network device.
+; FUJIGET.COM v1.8 -- fetch a file through FujiNet's N: network device.
 ;
 ;       FUJIGET N:<url> file.ext        e.g.  FUJIGET N1:TNFS://192.168.1.5/HELLO.TXT HELLO.TXT
 ;
@@ -85,6 +85,14 @@
 ;   NAME and renames NAME.$$$ to it. A failure or Ctrl-C erases NAME.$$$
 ;   and leaves the old NAME as it was.
 ; - SPEC holds 250 characters: the CCP's longest command tail fits.
+;-----------------------------------------------------------------------
+; v1.8 (2026-10-14): a refused OPEN now asks FujiNet WHY before it guesses.
+; FujiNet firmware from 2026-09-27 on (#1706) keeps the reason for a failed
+; OPEN, and STATUS reports it. 0A7H (access denied) now says "denied";
+; before, a read from a drop box (a write-only incoming/ folder, which also
+; refuses every listing) came out as "parent path does not exist". Any other
+; answer, and older firmware (0CFH, not connected), keep the parent-directory
+; guess below.
 ;
 ; AND BDOS CLOBBERS EVERY REGISTER (A,B,C,D,E,H,L -- only SP survives).
 ; Nothing may be left live in a register across CALL BDOS.
@@ -511,7 +519,16 @@ ABORT:  CALL    NCLOSE
 ; file's header for why "not found" (not "denied") is the right default
 ; here, unlike FUJIPUT.
 ;-----------------------------------------------------------------------
-EFAIL:  CALL    MKPRNT
+EFAIL:  CALL    MKSTAT          ; v1.8: ask FujiNet why first
+        CALL    SENDPK
+        CALL    RECVPK
+        LDA     RXBUF+1
+        CPI     ACKCMD
+        JNZ     EFPROB          ; no reason given -- guess, as before
+        LDA     RXBUF+9
+        CPI     0A7H            ; access denied (e.g. a drop box)
+        JZ      DODEN
+EFPROB: CALL    MKPRNT          ; not found, or older firmware: guess
         LDA     PVALID
         ORA     A
         JZ      DOSNF           ; couldn't even determine a parent -- default
@@ -535,6 +552,11 @@ EFAIL:  CALL    MKPRNT
         JMP     0
 
 DOSNF:  CALL    SAYNFND
+        JMP     0
+
+DODEN:  LXI     D,MDENY         ; v1.8
+        MVI     C,PRSTR
+        CALL    BDOS
         JMP     0
 
 ENODIR: CALL    NCLOSE
@@ -1374,6 +1396,8 @@ MNORE:  DB      CR,LF,'FUJIGET: destination server not'
         DB      ' responding.',CR,LF,'$'
 MNFND:  DB      CR,LF,'FUJIGET: not found on that remote'
         DB      ' server.',CR,LF,'$'
+MDENY:  DB      CR,LF,'FUJIGET: denied (permission or server'
+        DB      ' restriction).',CR,LF,'$'
 MBADP:  DB      CR,LF,'FUJIGET: failed -- parent path does not'
         DB      ' exist.',CR,LF,'$'
 MABRT:  DB      CR,LF,'FUJIGET: aborted. Nothing was saved.',CR,LF,'$'
@@ -1427,7 +1451,7 @@ MSKIP:  DB      CR,LF,'FUJIGET: not replaced.',CR,LF,'$'
 MPROGP: DB      'Received $'
 MPROGS: DB      ' KB...$'
 
-MUSAGE: DB      CR,LF,'FUJIGET v1.7 -- fetch a file through FujiNet''s'
+MUSAGE: DB      CR,LF,'FUJIGET v1.8 -- fetch a file through FujiNet''s'
         DB      ' N: network device.',CR,LF,CR,LF
         DB      '   FUJIGET N:<url> file.ext',CR,LF,CR,LF
         DB      'Example',CR,LF
