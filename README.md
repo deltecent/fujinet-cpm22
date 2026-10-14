@@ -113,22 +113,26 @@ just `fujinet-RS232-<build>.zip`). Pick the asset matching your OS and CPU:
 was tested against a nightly build that reports itself as `FujiNet v1.6-8f7231a78 2026-10-12
 23:27:33 (RS232)`. If something does not match this guide, that version is the reference point.
 
-**Check the date of your file.** The nightly release is one page, but each platform file on it
-is built at a different time. On 2026-10-13, the `macos-15-arm64` file was from 2026-10-13, the
-`macos-14-arm64` file was from 2026-10-03, and the `macos-15-x64` file was from 2026-09-21.
-When FujiNet-PC starts, it prints its version and build date in a line that starts with
-`FujiNet v`. Do not use a build dated 2026-10-02 to 2026-10-06. Those builds can cut off a
-`FUJIDIR` listing that is longer than 512 bytes.
+**Check the version line, not the file date.** The nightly release is one page, and its files
+are replaced in place. Each platform file has its own date, and a file can get a new date
+while the program in it stays the same. When FujiNet-PC starts, it prints its version and
+build date in a line that starts with `FujiNet v`. Use that line to identify your build. Do
+not use a build dated 2026-10-02 to 2026-10-06. Those builds can cut off a `FUJIDIR` listing
+that is longer than 512 bytes.
 
 **Install** (macOS):
 
 ```
-brew install openssl@4                                  # FujiNet-PC needs Homebrew's OpenSSL
-tar xzf fujinet-pc-RS232_*.tar.gz -C fujinet-rs232/     # or wherever you want it to live
-cd fujinet-rs232
-xattr -d com.apple.quarantine ./fujinet                 # macOS will otherwise refuse to run it
-chmod +x ./fujinet
+brew install openssl@4                       # FujiNet-PC needs Homebrew's OpenSSL
+mkdir -p ~/fujinet-pc                        # or wherever you want it to live
+tar xf ~/Downloads/fujinet-pc-RS232_*.tar* -C ~/fujinet-pc
+cd ~/fujinet-pc/fujinet-pc-RS232
+xattr -dr com.apple.quarantine .             # macOS will otherwise refuse to run it
 ```
+
+Safari removes the `.gz` from the download name, so the file can end in `.tar` or `.tar.gz`.
+`tar xf` reads both. The archive holds one folder, `fujinet-pc-RS232/`. macOS marks every
+file in it as downloaded, so `xattr -dr` clears the whole folder, not only `fujinet`.
 
 The macOS build of FujiNet-PC loads the OpenSSL library from [Homebrew](https://brew.sh). If
 the library is missing, FujiNet-PC stops at once with `Library not loaded:
@@ -140,7 +144,8 @@ come with the archive (or that get created on first run). The program uses paths
 its own working directory, not absolute ones. Always run it *from* that directory.
 
 **Configure it for BOIP** (Bus-over-IP: a raw TCP byte pipe standing in for the physical
-serial cable). Open `fnconfig.ini` and make sure
+serial cable). The `fnconfig.ini` in the download is already correct for this. If you changed
+it, make sure that
 
 ```ini
 [Serial]
@@ -168,9 +173,10 @@ Setting up BoIPChannel: listening on localhost:1985
 That is your signal it is ready. Leave it running in its own terminal or process for the
 whole `altairsim` session.
 
-**Convenience launcher**: `altairsim/run-fujinet` in this repo is a small wrapper. Drop it
-into your extracted FujiNet-PC directory and run `./run-fujinet -u 127.0.0.1:8005` instead of
-calling `./fujinet` directly. It automatically re-launches FujiNet-PC if it exits with code 75
+**Convenience launcher**: the download includes `run-fujinet`, a small wrapper. Run
+`./run-fujinet -u 127.0.0.1:8005` instead of calling `./fujinet` directly. (If your download
+does not have it, `altairsim/run-fujinet` in this repo is the same file. Copy it into the
+folder.) It automatically re-launches FujiNet-PC if it exits with code 75
 (`EX_TEMPFAIL`, "please retry"), instead of leaving you to notice and restart it by hand. It is
 not required. `./fujinet` on its own works fine. But it is one less thing to watch during a
 long session.
