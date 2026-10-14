@@ -1,17 +1,21 @@
 # Running your own TNFS server, optimized for CP/M
 
 Want to host your own TNFS server instead of relying on someone else's? See
-[de-tnfsd](https://github.com/trgeuy/de-tnfsd), our fork of
-[deltecent/de-tnfsd](https://github.com/deltecent/de-tnfsd). It splits the
-served namespace into a read-only `pub/` and a write-only `incoming/` drop
-box, the classic anonymous-FTP layout, enforced by the daemon itself rather
-than by filesystem permission tricks. Our fork adds the pieces a CP/M client
-needs: case-insensitive `pub`/`incoming` zone matching (CP/M's command
-processor uppercases every path before any program sees it), and an optional
-`contrib/tnfs-case-fix/` script that keeps leaf file names uppercase-reachable
-and stages finished uploads in a `for-review/` directory for a human to
-approve into `pub/`. See that repo's `README.md` for build, install, and
-setup instructions.
+[de-tnfsd](https://github.com/deltecent/de-tnfsd). It splits the served
+namespace into a read-only `pub/` and a write-only `incoming/` drop box, the
+classic anonymous-FTP layout, enforced by the daemon itself rather than by
+filesystem permission tricks. It has the pieces a CP/M client needs: the `-i`
+option matches names case-insensitively, including the `pub`/`incoming` zone
+names (CP/M's command processor uppercases every path before any program sees
+it), and an optional `contrib/tnfs-case-fix/` script keeps leaf file names
+uppercase-reachable and stages finished uploads in a `for-review/` directory
+for a human to approve into `pub/`. See that repo's `README.md` for build,
+install, and setup instructions.
+
+Use de-tnfsd from 2026-10-14 (commit `62714d0`) or later. Before that commit,
+a FujiNet upload into `incoming/` always failed: FujiNet checks the name with
+STAT before it opens the file for write, and the older daemon refused that
+STAT. See [deltecent/de-tnfsd#10](https://github.com/deltecent/de-tnfsd/pull/10).
 
 This guide is not part of the packaged release. Like `altairsim/` and
 `testing/`, it is only useful if you are setting up a server yourself. Get it
@@ -89,9 +93,8 @@ FUJIGET N1:TNFS://<host>/INCOMING/x.txt out.txt -> fails (unreadable)
 ```
 
 If the first two commands unexpectedly fail with "not found" or zone errors,
-check that you are running our `de-tnfsd` fork, not vanilla upstream. Without
-its case-fold patch, CP/M's uppercased `/PUB`/`/INCOMING` cannot resolve to
-either zone at all.
+check that de-tnfsd runs with the `-i` option. Without it, CP/M's uppercased
+`/PUB`/`/INCOMING` cannot resolve to either zone at all.
 
 If you installed `contrib/tnfs-case-fix/`, wait for the next cron tick (up to
 15 minutes) after the upload above, then check on the host itself, not over

@@ -44,7 +44,7 @@ launcher script (see sections 1 and 2 below). It is only useful if you are actua
 <https://github.com/trgeuy/fujinet-cpm22/tree/main/altairsim> if you want it.
 
 `tnfsd-server-setup/` gets the same treatment. It points you at
-[de-tnfsd](https://github.com/trgeuy/de-tnfsd), our fork of a TNFS daemon built around a
+[de-tnfsd](https://github.com/deltecent/de-tnfsd), a TNFS daemon built around a
 classic anonymous-FTP layout (read-only `pub/`, write-only `incoming/`), and covers what is
 specific to CP/M on top of that: the CCP-uppercases-everything gotcha and a verification
 checklist using this repo's own tools. It is only useful if you are running a server, not a
@@ -500,9 +500,9 @@ Z80 system, with all four tools tested on the real machine.
 ## 6. Testing without a real network host
 
 You do not need a real TNFS/HTTP server on your network to try any of this. Run
-[de-tnfsd](https://github.com/trgeuy/de-tnfsd), our TNFS server, on your own machine:
+[de-tnfsd](https://github.com/deltecent/de-tnfsd), a TNFS server, on your own machine:
 
-1. Build it from source: `git clone https://github.com/trgeuy/de-tnfsd`, then `make` in that
+1. Build it from source: `git clone https://github.com/deltecent/de-tnfsd`, then `make` in that
    folder. It is a small C program with no dependencies, and POSIX only (macOS and Linux, not
    Windows). The build puts the server at `bin/de-tnfsd`.
 2. Make a directory to serve, e.g. `mkdir share`, and put a test file or two in it.
